@@ -1,4 +1,4 @@
-.PHONY: setup lint format test
+.PHONY: setup lint format test db-up
 
 VENV := .venv
 PYTHON := $(VENV)/bin/python
@@ -7,6 +7,9 @@ setup:
 	python3 -m venv $(VENV)
 	$(PYTHON) -m pip install --upgrade pip
 	$(PYTHON) -m pip install -e ".[dev]"
+
+db-up:
+	docker compose up -d db
 
 lint:
 	$(PYTHON) -m ruff check .
