@@ -68,3 +68,52 @@ CREATE TABLE policy_chunks (
 
 CREATE INDEX policy_chunks_ts_idx ON policy_chunks USING GIN (ts);
 CREATE INDEX policy_chunks_embedding_idx ON policy_chunks USING hnsw (embedding vector_cosine_ops);
+
+-- the approval queue: a gated write stops here and waits for a human decision.
+CREATE TABLE pending_actions (
+    id SERIAL PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    employee_id TEXT NOT NULL REFERENCES employees (id),
+    tool TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending_approval'
+        CHECK (status IN ('pending_approval', 'approved', 'rejected', 'executed', 'expired')),
+    decided_by TEXT,
+    decided_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- append-only trail: every tool call, proposal, approval, execution and model
+-- call, with the actor that performed it. actor: agent | employee:<id> |
+-- approver:<id> | system. event: tool_call | action_proposed |
+-- action_approved | action_rejected | action_executed | decision_recorded |
+-- feedback_received | model_call.
+CREATE TABLE audit_log (
+    id SERIAL PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    event TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- one row per request: the persisted "why" — outcome, evidence trail,
+-- citations, versions and cost, readable without re-running anything.
+CREATE TABLE decision_records (
+    request_id TEXT PRIMARY KEY,
+    employee_id TEXT NOT NULL REFERENCES employees (id),
+    channel TEXT NOT NULL CHECK (channel IN ('rest', 'mcp')),
+    outcome TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    evidence JSONB NOT NULL,
+    citations TEXT[] NOT NULL DEFAULT '{}',
+    policy_version TEXT,
+    prompt_versions JSONB,
+    verifier JSONB,
+    model_calls JSONB,
+    total_tokens INT NOT NULL DEFAULT 0,
+    total_cost_eur NUMERIC NOT NULL DEFAULT 0,
+    latency_ms INT,
+    trace_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
