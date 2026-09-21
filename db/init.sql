@@ -49,3 +49,22 @@ CREATE TABLE known_outages (
     started_at TIMESTAMPTZ NOT NULL,
     note TEXT
 );
+
+-- id format: "<policy>#<heading-slug>#<n>" — stable and ground-truth-addressable;
+-- citations and eval scenarios reference these ids directly.
+CREATE TABLE policy_chunks (
+    id TEXT PRIMARY KEY,
+    policy TEXT NOT NULL,
+    heading TEXT NOT NULL,
+    content TEXT NOT NULL,
+    domain TEXT NOT NULL CHECK (domain IN ('hr', 'it')),
+    audience TEXT NOT NULL DEFAULT 'all',
+    lang TEXT NOT NULL DEFAULT 'en',
+    effective_date DATE,
+    chunker TEXT NOT NULL DEFAULT 'structural',
+    embedding vector(1536),
+    ts tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED
+);
+
+CREATE INDEX policy_chunks_ts_idx ON policy_chunks USING GIN (ts);
+CREATE INDEX policy_chunks_embedding_idx ON policy_chunks USING hnsw (embedding vector_cosine_ops);
