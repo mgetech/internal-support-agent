@@ -117,3 +117,24 @@ CREATE TABLE decision_records (
     trace_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE feedback (
+    id SERIAL PRIMARY KEY,
+    request_id TEXT NOT NULL REFERENCES decision_records (request_id),
+    employee_id TEXT NOT NULL REFERENCES employees (id),
+    rating TEXT NOT NULL CHECK (rating IN ('up', 'down')),
+    comment TEXT,
+    triage_status TEXT NOT NULL DEFAULT 'new'
+        CHECK (triage_status IN ('new', 'reviewed', 'scenario_created', 'dismissed')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- rolled up from decision_records; not written to directly by requests.
+CREATE TABLE usage_daily (
+    day DATE NOT NULL,
+    employee_id TEXT NOT NULL REFERENCES employees (id),
+    requests INT NOT NULL DEFAULT 0,
+    total_tokens INT NOT NULL DEFAULT 0,
+    total_cost_eur NUMERIC NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, employee_id)
+);
