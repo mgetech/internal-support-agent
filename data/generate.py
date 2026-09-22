@@ -1,22 +1,37 @@
-"""Deterministic synthetic data: employees, leave balances, IT outages and the
-HR/IT policy corpus.
+"""Deterministic synthetic data: employees, leave balances, IT outages, plus
+reading the hand-authored HR/IT policy corpus and turning it into a seed.
 
-No randomness — every row is planted data, so two runs are byte-identical
-without needing an RNG seed. Entitlement is computed from the vacation policy
-rule (pre-/post-2024 contracts, part-time proration, first-year probation
-accrual) against a fixed reference date, never `date.today()`, so the output
-never drifts with wall-clock time.
+No randomness for the employee data — every row is planted, so two runs are
+byte-identical without needing an RNG seed. Entitlement is computed from the
+vacation policy rule (pre-/post-2024 contracts, part-time proration,
+first-year probation accrual) against a fixed reference date, never
+`date.today()`, so the output never drifts with wall-clock time.
+
+The policy corpus itself (`data/policies/*.md`) is the source of truth, not
+generated — adding or editing a policy means editing its markdown file, the
+same way any document-ingestion pipeline picks up whatever's on disk.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import yaml
+
+from support_agent.chunking import StructuralChunker
+from support_agent.embeddings import embed_texts
+
 YEAR = 2026
-POLICY_VERSION = "2026-09.1"
 POLICIES_DIR = Path(__file__).resolve().parent / "policies"
+SEED_SQL_PATH = Path(__file__).resolve().parent / "seed.sql"
+CACHE_DIR = Path(__file__).resolve().parent.parent / ".embeddings-cache"
+EMBEDDING_MODEL = "text-embedding-3-small"
 
 # the date this dataset is generated "as of" — fixed, not date.today(), so
 # entitlement accrual (which depends on tenure) is stable across runs
@@ -135,164 +150,152 @@ def generate_known_outages() -> list[dict]:
 
 
 @dataclass(frozen=True)
-class _PolicyDoc:
+class PolicyFile:
     id: str
     domain: str
-    title: str
-    body: str
+    policy_version: str
+    text: str  # markdown body, frontmatter stripped
 
 
-# escalation-only areas (marked in prose below) are what refusals and
-# escalations cite: mid-year hours changes, sick leave beyond six weeks,
-# parental-leave eligibility, and security incidents.
-_POLICIES = [
-    _PolicyDoc(
-        id="vacation-policy",
-        domain="hr",
-        title="Vacation Policy",
-        body="""\
-## Entitlement
-
-Full-time employees accrue 30 vacation days per calendar year. Employees whose
-employment contract began in 2024 or later accrue 28 days per year instead. During
-an employee's probationary period and for the remainder of their first year of
-employment, vacation entitlement accrues pro-rata at 2.5 days per completed month
-of service, rather than the full annual amount.
-
-## Part-Time and Mid-Year Changes
-
-Part-time entitlement is prorated against a 40-hour full-time reference week and
-rounded to the nearest half day. An employee working 20 hours per week at the
-standard 30-day full-time rate is entitled to 15 days per year.
-
-Changes to an employee's contracted weekly hours partway through the year are not
-handled through self-service. HR reviews each mid-year hours change individually
-and recalculates entitlement case by case.
-
-## Booking and Approval
-
-Vacation requests require the requesting employee's manager to approve before the
-days are booked. Requests covering ten or more consecutive working days require at
-least two weeks' notice before the first day of leave.
-
-## Carryover
-
-Up to 5 unused vacation days may be carried over into the following calendar year.
-Carried-over days must be used by March 31 of that year; any carryover remaining
-after March 31 is forfeited.
-""",
-    ),
-    _PolicyDoc(
-        id="sick-leave-policy",
-        domain="hr",
-        title="Sick Leave Policy",
-        body="""\
-## Notification and Certification
-
-Employees must notify their manager before the start of the working day on the
-first day of a sickness absence. A medical certificate from a doctor is required
-starting on the third consecutive day of absence.
-
-## Pay Continuation
-
-Statutory continued pay covers up to six consecutive weeks of sickness absence per
-illness. Absences that extend beyond six weeks are not handled by this policy
-directly — they must be referred to HR, which determines continued-pay eligibility
-and any transition to statutory sick pay from the health insurer.
-
-## Sickness During Vacation
-
-An employee who falls sick during an approved vacation period and provides a
-medical certificate covering the affected days has those days re-credited to their
-vacation balance rather than counted as vacation taken.
-""",
-    ),
-    _PolicyDoc(
-        id="parental-leave-policy",
-        domain="hr",
-        title="Parental Leave Policy",
-        body="""\
-## Entitlement and Notice
-
-Employees are entitled to take parental leave for up to three years per child.
-Written notice of the intended start date must be given to HR at least seven weeks
-in advance.
-
-## Part-Time During Leave
-
-Working part-time during parental leave is possible within statutory limits,
-subject to agreement with the employer on the reduced hours and schedule.
-
-## Eligibility and Benefit Interactions
-
-Individual eligibility for parental leave, and how it interacts with Elterngeld
-(state parental allowance) payments, depends on circumstances specific to each
-employee. These determinations are not made by self-service tools and always
-require review by HR.
-""",
-    ),
-    _PolicyDoc(
-        id="expense-policy",
-        domain="hr",
-        title="Expense Policy",
-        body="""\
-## Receipts and Submission
-
-A receipt is required for any expense over €10. Expense claims must be submitted
-within 60 days of the date the expense was incurred.
-
-## Late Submissions
-
-Claims submitted after the 60-day window are not reimbursed automatically. A late
-submission requires approval from both the employee's manager and Finance before
-it can be processed.
-""",
-    ),
-    _PolicyDoc(
-        id="it-access-policy",
-        domain="it",
-        title="IT Access Policy",
-        body="""\
-## VPN Access
-
-VPN access is enabled by default for all employees. Before opening a ticket for a
-VPN connectivity problem, check current known outages — if the issue matches an
-active outage, no new ticket is needed; the employee should be informed of the
-outage and its status instead.
-
-## Password Self-Service
-
-Password resets are handled through self-service via the identity portal. Support
-tickets may be opened to verify an employee's identity when self-service fails,
-but passwords are never handled, reset, or accepted in conversation by anyone
-other than the employee themselves through the portal.
-
-## Software Licenses
-
-Software licenses costing more than €100 per year require the employee's manager
-to approve the cost before purchase.
-
-## Security Incidents
-
-Suspected phishing, a lost or stolen device, or exposed credentials are security
-incidents. These are always escalated immediately as a priority ticket; there is
-no self-remediation step for a security incident, regardless of how minor it may
-appear.
-""",
-    ),
-]
+_FRONTMATTER_RE = re.compile(r"\A---\n(.*?\n)---\n", re.DOTALL)
 
 
-def _render_policy_markdown(policy: _PolicyDoc) -> str:
-    return f"# {policy.title}\n\n_Policy version: {POLICY_VERSION}_\n\n{policy.body}"
+def _split_frontmatter(raw: str) -> tuple[dict, str]:
+    match = _FRONTMATTER_RE.match(raw)
+    if not match:
+        raise ValueError("policy file is missing its frontmatter block")
+    meta = yaml.safe_load(match.group(1))
+    return meta, raw[match.end() :]
 
 
-def generate_policies() -> dict[str, str]:
-    """Policy id -> full markdown text, in corpus order."""
-    return {p.id: _render_policy_markdown(p) for p in _POLICIES}
+def read_policies(policies_dir: Path = POLICIES_DIR) -> dict[str, PolicyFile]:
+    """Read every `*.md` file in `policies_dir` — the hand-authored source of
+    truth for the corpus. Adding a policy means adding a file here, not
+    editing this module.
+    """
+    policies = {}
+    for path in sorted(policies_dir.glob("*.md")):
+        meta, body = _split_frontmatter(path.read_text(encoding="utf-8"))
+        policies[path.stem] = PolicyFile(
+            id=path.stem,
+            domain=meta["domain"],
+            policy_version=meta["policy_version"],
+            text=body,
+        )
+    return policies
 
 
-def write_policies(output_dir: Path = POLICIES_DIR) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for policy_id, text in generate_policies().items():
-        (output_dir / f"{policy_id}.md").write_text(text, encoding="utf-8", newline="\n")
+def generate_policy_chunks() -> list[dict]:
+    """One row per chunk, ready for the `policy_chunks` table — everything
+    except the embedding, which is attached separately (see
+    `embed_policy_chunks`) rather than computed as part of chunking.
+    """
+    chunker = StructuralChunker()
+    rows = []
+    for policy in read_policies().values():
+        for chunk in chunker.chunk(policy.id, policy.text):
+            rows.append(
+                {
+                    "id": chunk.id,
+                    "policy": policy.id,
+                    "heading": chunk.heading,
+                    "content": chunk.content,
+                    "domain": policy.domain,
+                    "chunker": chunk.meta["chunker"],
+                }
+            )
+    return rows
+
+
+EmbedFn = Callable[[list[str]], list[list[float]]]
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _cache_path(cache_dir: Path, model: str) -> Path:
+    return cache_dir / f"{model}.json"
+
+
+def _load_cache(cache_dir: Path, model: str) -> dict[str, list[float]]:
+    path = _cache_path(cache_dir, model)
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _save_cache(cache_dir: Path, model: str, cache: dict[str, list[float]]) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    _cache_path(cache_dir, model).write_text(json.dumps(cache), encoding="utf-8")
+
+
+def embed_policy_chunks(
+    rows: list[dict] | None = None,
+    embed_fn: EmbedFn = embed_texts,
+    model: str = EMBEDDING_MODEL,
+    cache_dir: Path = CACHE_DIR,
+) -> dict[str, list[float]]:
+    """Chunk id -> embedding vector. Only chunks whose content hash is
+    missing from the on-disk cache are sent to `embed_fn`, so regenerating
+    is free once every current chunk has been embedded once.
+    """
+    rows = generate_policy_chunks() if rows is None else rows
+    cache = _load_cache(cache_dir, model)
+
+    missing = {_content_hash(row["content"]): row["content"] for row in rows}
+    missing = {h: t for h, t in missing.items() if h not in cache}
+
+    if missing:
+        hashes = list(missing)
+        vectors = embed_fn([missing[h] for h in hashes])
+        cache.update(zip(hashes, vectors, strict=True))
+        _save_cache(cache_dir, model, cache)
+
+    return {row["id"]: cache[_content_hash(row["content"])] for row in rows}
+
+
+_EMPLOYEE_COLUMNS = ["id", "name", "role", "employment_type", "weekly_hours", "country", "hired_at"]
+_LEAVE_BALANCE_COLUMNS = ["employee_id", "year", "entitlement_days", "taken_days", "pending_days"]
+_OUTAGE_COLUMNS = ["system", "status", "started_at", "note"]
+_POLICY_CHUNK_COLUMNS = ["id", "policy", "heading", "content", "domain", "chunker"]
+
+
+def _sql_literal(value: object) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, int | float):
+        return str(value)
+    if isinstance(value, date):
+        return "'" + value.isoformat() + "'"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _insert(table: str, columns: list[str], rows: list[dict]) -> str:
+    if not rows:
+        return ""
+    values = ",\n".join(
+        "    (" + ", ".join(_sql_literal(row[c]) for c in columns) + ")" for row in rows
+    )
+    return f"INSERT INTO {table} ({', '.join(columns)}) VALUES\n{values};\n"
+
+
+def render_seed_sql() -> str:
+    """The full seed as INSERT statements. `policy_chunks` rows carry every
+    column except `embedding` — vectors never enter this file; they're
+    attached from the on-disk cache when the seed is loaded into Postgres.
+    """
+    parts = [
+        "-- generated by data/generate.py — do not edit by hand\n",
+        _insert("employees", _EMPLOYEE_COLUMNS, generate_employees()),
+        _insert("leave_balances", _LEAVE_BALANCE_COLUMNS, generate_leave_balances()),
+        _insert("known_outages", _OUTAGE_COLUMNS, generate_known_outages()),
+        _insert("policy_chunks", _POLICY_CHUNK_COLUMNS, generate_policy_chunks()),
+    ]
+    return "\n".join(part for part in parts if part)
+
+
+def write_seed_sql(output_path: Path = SEED_SQL_PATH) -> None:
+    output_path.write_text(render_seed_sql(), encoding="utf-8", newline="\n")

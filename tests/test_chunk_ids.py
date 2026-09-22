@@ -3,7 +3,7 @@ citations reference chunks by id directly, so the format and the specific
 `vacation-policy#entitlement#0` id must hold exactly.
 """
 
-from data.generate import generate_policies
+from data.generate import read_policies
 
 from support_agent.chunking import StructuralChunker
 
@@ -11,7 +11,7 @@ CHUNKER = StructuralChunker()
 
 
 def _chunk_ids(policy_id: str) -> list[str]:
-    text = generate_policies()[policy_id]
+    text = read_policies()[policy_id].text
     return [c.id for c in CHUNKER.chunk(policy_id, text)]
 
 
@@ -20,8 +20,8 @@ def test_vacation_policy_entitlement_chunk_id_matches_the_spec():
 
 
 def test_chunk_id_format_across_the_whole_corpus():
-    for policy_id, text in generate_policies().items():
-        for chunk in CHUNKER.chunk(policy_id, text):
+    for policy_id, policy in read_policies().items():
+        for chunk in CHUNKER.chunk(policy_id, policy.text):
             prefix, slug, n = chunk.id.split("#")
             assert prefix == policy_id
             assert slug == slug.lower()
@@ -42,21 +42,21 @@ def test_chunk_ids_are_unique_within_a_policy():
 
 
 def test_chunk_content_is_prefixed_with_policy_title_as_context():
-    text = generate_policies()["vacation-policy"]
+    text = read_policies()["vacation-policy"].text
     chunks = CHUNKER.chunk("vacation-policy", text)
 
     assert all(c.content.startswith("Vacation Policy — ") for c in chunks)
 
 
 def test_chunk_meta_tags_the_chunker_strategy():
-    text = generate_policies()["vacation-policy"]
+    text = read_policies()["vacation-policy"].text
     chunks = CHUNKER.chunk("vacation-policy", text)
 
     assert all(c.meta["chunker"] == "structural" for c in chunks)
 
 
 def test_chunking_is_deterministic():
-    text = generate_policies()["vacation-policy"]
+    text = read_policies()["vacation-policy"].text
 
     assert CHUNKER.chunk("vacation-policy", text) == CHUNKER.chunk("vacation-policy", text)
 

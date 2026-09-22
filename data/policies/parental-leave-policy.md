@@ -1,6 +1,8 @@
+---
+domain: hr
+policy_version: 2026-09.1
+---
 # Parental Leave Policy
-
-_Policy version: 2026-09.1_
 
 ## Entitlement and Notice
 

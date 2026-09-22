@@ -1,6 +1,8 @@
+---
+domain: hr
+policy_version: 2026-09.1
+---
 # Expense Policy
-
-_Policy version: 2026-09.1_
 
 ## Receipts and Submission
 

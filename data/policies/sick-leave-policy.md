@@ -1,6 +1,8 @@
+---
+domain: hr
+policy_version: 2026-09.1
+---
 # Sick Leave Policy
-
-_Policy version: 2026-09.1_
 
 ## Notification and Certification
 

@@ -4,13 +4,16 @@ generator must be deterministic — no wall-clock or RNG dependence.
 
 from datetime import date
 
+import pytest
 from data.generate import (
-    POLICIES_DIR,
-    POLICY_VERSION,
+    embed_policy_chunks,
     generate_employees,
     generate_known_outages,
     generate_leave_balances,
-    generate_policies,
+    generate_policy_chunks,
+    read_policies,
+    render_seed_sql,
+    write_seed_sql,
 )
 
 
@@ -86,35 +89,36 @@ def test_generation_is_deterministic():
     assert generate_employees() == generate_employees()
     assert generate_leave_balances() == generate_leave_balances()
     assert generate_known_outages() == generate_known_outages()
-    assert generate_policies() == generate_policies()
 
 
-def test_five_policies_with_expected_ids():
-    policies = generate_policies()
+def test_five_policies_with_expected_ids_and_domains():
+    policies = read_policies()
 
-    assert set(policies) == {
+    assert {p.id for p in policies.values()} == {
         "vacation-policy",
         "sick-leave-policy",
         "parental-leave-policy",
         "expense-policy",
         "it-access-policy",
     }
+    assert policies["it-access-policy"].domain == "it"
+    assert policies["vacation-policy"].domain == "hr"
 
 
-def test_every_policy_carries_the_policy_version():
-    for text in generate_policies().values():
-        assert f"Policy version: {POLICY_VERSION}" in text
+def test_every_policy_carries_the_policy_version_in_frontmatter():
+    for policy in read_policies().values():
+        assert policy.policy_version == "2026-09.1"
 
 
 def test_vacation_policy_has_the_entitlement_heading():
     # ground truth citations (e.g. vacation-policy#entitlement#0) depend on
     # this exact heading text once the structural chunker slugifies it
-    assert "## Entitlement" in generate_policies()["vacation-policy"]
+    assert "## Entitlement" in read_policies()["vacation-policy"].text
 
 
 def test_escalation_only_areas_are_written_into_the_policy_text():
     # hard-wrapped prose, so compare against whitespace-normalized text
-    policies = {k: " ".join(v.split()) for k, v in generate_policies().items()}
+    policies = {k: " ".join(p.text.split()) for k, p in read_policies().items()}
 
     assert "not handled through self-service" in policies["vacation-policy"]
     assert "referred to HR" in policies["sick-leave-policy"]
@@ -122,7 +126,80 @@ def test_escalation_only_areas_are_written_into_the_policy_text():
     assert "always escalated immediately" in policies["it-access-policy"]
 
 
-def test_committed_policy_files_match_the_generator():
-    for policy_id, text in generate_policies().items():
-        committed = (POLICIES_DIR / f"{policy_id}.md").read_text(encoding="utf-8")
-        assert committed == text
+def test_read_policies_rejects_a_file_missing_frontmatter(tmp_path):
+    (tmp_path / "broken-policy.md").write_text("# Broken Policy\n\nNo frontmatter here.\n")
+
+    with pytest.raises(ValueError, match="frontmatter"):
+        read_policies(tmp_path)
+
+
+def test_generate_policy_chunks_covers_the_whole_corpus():
+    assert len(generate_policy_chunks()) == 16
+
+
+def test_policy_chunk_rows_carry_domain_from_their_policy():
+    rows = {r["id"]: r for r in generate_policy_chunks()}
+
+    assert rows["it-access-policy#vpn-access#0"]["domain"] == "it"
+    assert rows["vacation-policy#entitlement#0"]["domain"] == "hr"
+    assert rows["vacation-policy#entitlement#0"]["chunker"] == "structural"
+
+
+def test_embed_policy_chunks_returns_a_vector_per_chunk_id(tmp_path):
+    rows = generate_policy_chunks()[:3]
+
+    def fake_embed(texts):
+        return [[float(len(t))] for t in texts]
+
+    vectors = embed_policy_chunks(rows, embed_fn=fake_embed, model="fake", cache_dir=tmp_path)
+
+    assert set(vectors) == {row["id"] for row in rows}
+    for row in rows:
+        assert vectors[row["id"]] == [float(len(row["content"]))]
+
+
+def test_embed_policy_chunks_caches_and_skips_already_embedded_content(tmp_path):
+    rows = generate_policy_chunks()[:2]
+    calls = []
+
+    def counting_embed(texts):
+        calls.append(list(texts))
+        return [[0.0] for _ in texts]
+
+    embed_policy_chunks(rows, embed_fn=counting_embed, model="fake", cache_dir=tmp_path)
+    embed_policy_chunks(rows, embed_fn=counting_embed, model="fake", cache_dir=tmp_path)
+
+    assert len(calls) == 1  # the second call found everything already cached
+    assert (tmp_path / "fake.json").exists()
+
+
+def test_render_seed_sql_contains_all_four_tables():
+    sql = render_seed_sql()
+
+    assert "INSERT INTO employees" in sql
+    assert "INSERT INTO leave_balances" in sql
+    assert "INSERT INTO known_outages" in sql
+    assert "INSERT INTO policy_chunks" in sql
+
+
+def test_render_seed_sql_excludes_the_embedding_column():
+    sql = render_seed_sql()
+
+    header = sql[sql.index("INSERT INTO policy_chunks") :].splitlines()[0]
+    assert "embedding" not in header
+
+
+def test_render_seed_sql_escapes_single_quotes():
+    # "the requesting employee's manager" from the vacation policy text
+    assert "employee''s manager" in render_seed_sql()
+
+
+def test_render_seed_sql_is_deterministic():
+    assert render_seed_sql() == render_seed_sql()
+
+
+def test_write_seed_sql_matches_render(tmp_path):
+    output = tmp_path / "seed.sql"
+    write_seed_sql(output)
+
+    assert output.read_text(encoding="utf-8") == render_seed_sql()

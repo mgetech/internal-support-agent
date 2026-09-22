@@ -1,6 +1,8 @@
+---
+domain: it
+policy_version: 2026-09.1
+---
 # IT Access Policy
-
-_Policy version: 2026-09.1_
 
 ## VPN Access
 
