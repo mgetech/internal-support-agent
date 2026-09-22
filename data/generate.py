@@ -1,4 +1,5 @@
-"""Deterministic synthetic data: employees, leave balances and IT outages.
+"""Deterministic synthetic data: employees, leave balances, IT outages and the
+HR/IT policy corpus.
 
 No randomness — every row is planted data, so two runs are byte-identical
 without needing an RNG seed. Entitlement is computed from the vacation policy
@@ -11,8 +12,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 YEAR = 2026
+POLICY_VERSION = "2026-09.1"
+POLICIES_DIR = Path(__file__).resolve().parent / "policies"
 
 # the date this dataset is generated "as of" — fixed, not date.today(), so
 # entitlement accrual (which depends on tenure) is stable across runs
@@ -128,3 +132,167 @@ def generate_known_outages() -> list[dict]:
             "note": "identity provider outage; resolved after failover to the secondary node",
         },
     ]
+
+
+@dataclass(frozen=True)
+class _PolicyDoc:
+    id: str
+    domain: str
+    title: str
+    body: str
+
+
+# escalation-only areas (marked in prose below) are what refusals and
+# escalations cite: mid-year hours changes, sick leave beyond six weeks,
+# parental-leave eligibility, and security incidents.
+_POLICIES = [
+    _PolicyDoc(
+        id="vacation-policy",
+        domain="hr",
+        title="Vacation Policy",
+        body="""\
+## Entitlement
+
+Full-time employees accrue 30 vacation days per calendar year. Employees whose
+employment contract began in 2024 or later accrue 28 days per year instead. During
+an employee's probationary period and for the remainder of their first year of
+employment, vacation entitlement accrues pro-rata at 2.5 days per completed month
+of service, rather than the full annual amount.
+
+## Part-Time and Mid-Year Changes
+
+Part-time entitlement is prorated against a 40-hour full-time reference week and
+rounded to the nearest half day. An employee working 20 hours per week at the
+standard 30-day full-time rate is entitled to 15 days per year.
+
+Changes to an employee's contracted weekly hours partway through the year are not
+handled through self-service. HR reviews each mid-year hours change individually
+and recalculates entitlement case by case.
+
+## Booking and Approval
+
+Vacation requests require the requesting employee's manager to approve before the
+days are booked. Requests covering ten or more consecutive working days require at
+least two weeks' notice before the first day of leave.
+
+## Carryover
+
+Up to 5 unused vacation days may be carried over into the following calendar year.
+Carried-over days must be used by March 31 of that year; any carryover remaining
+after March 31 is forfeited.
+""",
+    ),
+    _PolicyDoc(
+        id="sick-leave-policy",
+        domain="hr",
+        title="Sick Leave Policy",
+        body="""\
+## Notification and Certification
+
+Employees must notify their manager before the start of the working day on the
+first day of a sickness absence. A medical certificate from a doctor is required
+starting on the third consecutive day of absence.
+
+## Pay Continuation
+
+Statutory continued pay covers up to six consecutive weeks of sickness absence per
+illness. Absences that extend beyond six weeks are not handled by this policy
+directly — they must be referred to HR, which determines continued-pay eligibility
+and any transition to statutory sick pay from the health insurer.
+
+## Sickness During Vacation
+
+An employee who falls sick during an approved vacation period and provides a
+medical certificate covering the affected days has those days re-credited to their
+vacation balance rather than counted as vacation taken.
+""",
+    ),
+    _PolicyDoc(
+        id="parental-leave-policy",
+        domain="hr",
+        title="Parental Leave Policy",
+        body="""\
+## Entitlement and Notice
+
+Employees are entitled to take parental leave for up to three years per child.
+Written notice of the intended start date must be given to HR at least seven weeks
+in advance.
+
+## Part-Time During Leave
+
+Working part-time during parental leave is possible within statutory limits,
+subject to agreement with the employer on the reduced hours and schedule.
+
+## Eligibility and Benefit Interactions
+
+Individual eligibility for parental leave, and how it interacts with Elterngeld
+(state parental allowance) payments, depends on circumstances specific to each
+employee. These determinations are not made by self-service tools and always
+require review by HR.
+""",
+    ),
+    _PolicyDoc(
+        id="expense-policy",
+        domain="hr",
+        title="Expense Policy",
+        body="""\
+## Receipts and Submission
+
+A receipt is required for any expense over €10. Expense claims must be submitted
+within 60 days of the date the expense was incurred.
+
+## Late Submissions
+
+Claims submitted after the 60-day window are not reimbursed automatically. A late
+submission requires approval from both the employee's manager and Finance before
+it can be processed.
+""",
+    ),
+    _PolicyDoc(
+        id="it-access-policy",
+        domain="it",
+        title="IT Access Policy",
+        body="""\
+## VPN Access
+
+VPN access is enabled by default for all employees. Before opening a ticket for a
+VPN connectivity problem, check current known outages — if the issue matches an
+active outage, no new ticket is needed; the employee should be informed of the
+outage and its status instead.
+
+## Password Self-Service
+
+Password resets are handled through self-service via the identity portal. Support
+tickets may be opened to verify an employee's identity when self-service fails,
+but passwords are never handled, reset, or accepted in conversation by anyone
+other than the employee themselves through the portal.
+
+## Software Licenses
+
+Software licenses costing more than €100 per year require the employee's manager
+to approve the cost before purchase.
+
+## Security Incidents
+
+Suspected phishing, a lost or stolen device, or exposed credentials are security
+incidents. These are always escalated immediately as a priority ticket; there is
+no self-remediation step for a security incident, regardless of how minor it may
+appear.
+""",
+    ),
+]
+
+
+def _render_policy_markdown(policy: _PolicyDoc) -> str:
+    return f"# {policy.title}\n\n_Policy version: {POLICY_VERSION}_\n\n{policy.body}"
+
+
+def generate_policies() -> dict[str, str]:
+    """Policy id -> full markdown text, in corpus order."""
+    return {p.id: _render_policy_markdown(p) for p in _POLICIES}
+
+
+def write_policies(output_dir: Path = POLICIES_DIR) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for policy_id, text in generate_policies().items():
+        (output_dir / f"{policy_id}.md").write_text(text, encoding="utf-8", newline="\n")

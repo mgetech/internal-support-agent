@@ -4,7 +4,14 @@ and the generator must be deterministic — no wall-clock or RNG dependence.
 
 from datetime import date
 
-from data.generate import generate_employees, generate_known_outages, generate_leave_balances
+from data.generate import (
+    POLICIES_DIR,
+    POLICY_VERSION,
+    generate_employees,
+    generate_known_outages,
+    generate_leave_balances,
+    generate_policies,
+)
 
 
 def _balance(employee_id: str) -> dict:
@@ -79,3 +86,43 @@ def test_generation_is_deterministic():
     assert generate_employees() == generate_employees()
     assert generate_leave_balances() == generate_leave_balances()
     assert generate_known_outages() == generate_known_outages()
+    assert generate_policies() == generate_policies()
+
+
+def test_five_policies_with_expected_ids():
+    policies = generate_policies()
+
+    assert set(policies) == {
+        "vacation-policy",
+        "sick-leave-policy",
+        "parental-leave-policy",
+        "expense-policy",
+        "it-access-policy",
+    }
+
+
+def test_every_policy_carries_the_policy_version():
+    for text in generate_policies().values():
+        assert f"Policy version: {POLICY_VERSION}" in text
+
+
+def test_vacation_policy_has_the_entitlement_heading():
+    # ground truth citations (e.g. vacation-policy#entitlement#0) depend on
+    # this exact heading text once the structural chunker slugifies it
+    assert "## Entitlement" in generate_policies()["vacation-policy"]
+
+
+def test_escalation_only_areas_are_written_into_the_policy_text():
+    # hard-wrapped prose, so compare against whitespace-normalized text
+    policies = {k: " ".join(v.split()) for k, v in generate_policies().items()}
+
+    assert "not handled through self-service" in policies["vacation-policy"]
+    assert "referred to HR" in policies["sick-leave-policy"]
+    assert "always require review by HR" in policies["parental-leave-policy"]
+    assert "always escalated immediately" in policies["it-access-policy"]
+
+
+def test_committed_policy_files_match_the_generator():
+    for policy_id, text in generate_policies().items():
+        committed = (POLICIES_DIR / f"{policy_id}.md").read_text(encoding="utf-8")
+        assert committed == text
