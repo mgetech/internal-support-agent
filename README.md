@@ -1,4 +1,4 @@
-# internal-support-agent
+# Internal HR/IT Support Agent
 
 [![CI](https://github.com/mgetech/internal-support-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/mgetech/internal-support-agent/actions/workflows/ci.yml)
 
