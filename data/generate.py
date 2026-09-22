@@ -42,10 +42,10 @@ class _EmployeeProfile:
     pending_days: float = 0.0
 
 
-# the planted edge cases (§7 of the spec): emp_001 happy path, emp_003
-# part-time proration, emp_004 over-balance, emp_005/emp_010 authorized
-# approver roles, emp_006 first-year probation accrual, emp_012 zero
-# remaining. The rest fill out the roster of 12 with plausible history.
+# the planted edge cases: emp_001 happy path, emp_003 part-time proration,
+# emp_004 over-balance, emp_005/emp_010 authorized approver roles, emp_006
+# first-year probation accrual, emp_012 zero remaining. The rest fill out
+# the roster of 12 with plausible history.
 # (id, name, role, employment_type, weekly_hours, country, hired_at, taken_days)
 _PROFILE_ROWS: list[tuple[str, str, str, str, float, str, date, float]] = [
     ("emp_001", "Anna Keller", "employee", "full_time", 40.0, "DE", date(2021, 3, 1), 12.0),

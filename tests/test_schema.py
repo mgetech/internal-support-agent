@@ -1,5 +1,5 @@
-"""Smoke test: db/init.sql produces every table and CHECK constraint §6 of the
-spec requires. Catches an accidentally dropped table or constraint, not
+"""Smoke test: db/init.sql produces every table and CHECK constraint the
+schema requires. Catches an accidentally dropped table or constraint, not
 business logic.
 """
 

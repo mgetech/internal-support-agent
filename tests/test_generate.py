@@ -1,5 +1,5 @@
-"""The planted edge cases (§7 of the spec) must show up exactly as promised,
-and the generator must be deterministic — no wall-clock or RNG dependence.
+"""The planted edge cases must show up exactly as promised, and the
+generator must be deterministic — no wall-clock or RNG dependence.
 """
 
 from datetime import date
