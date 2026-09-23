@@ -137,6 +137,12 @@ def test_generate_policy_chunks_covers_the_whole_corpus():
     assert len(generate_policy_chunks()) == 16
 
 
+def test_generate_policy_chunks_is_stable_across_regeneration():
+    # each call re-reads every policy file from disk; two independent runs
+    # (as two separate `make seed` invocations would be) must agree exactly
+    assert generate_policy_chunks() == generate_policy_chunks()
+
+
 def test_policy_chunk_rows_carry_domain_from_their_policy():
     rows = {r["id"]: r for r in generate_policy_chunks()}
 

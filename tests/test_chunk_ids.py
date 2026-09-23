@@ -82,3 +82,37 @@ def test_section_over_budget_sub_splits_with_overlap():
     first_words = chunks[0].content.split()
     second_words = chunks[1].content.split()
     assert first_words[-50:] == second_words[3:53]
+
+
+# the complete, pinned set of ids the whole corpus must produce. Eval
+# scenarios and citations reference these directly, so a heading edit that
+# silently changes an id has to fail a test here, not surface later as a
+# broken citation.
+EXPECTED_CHUNK_IDS = {
+    "vacation-policy#entitlement#0",
+    "vacation-policy#part-time-and-mid-year-changes#0",
+    "vacation-policy#booking-and-approval#0",
+    "vacation-policy#carryover#0",
+    "sick-leave-policy#notification-and-certification#0",
+    "sick-leave-policy#pay-continuation#0",
+    "sick-leave-policy#sickness-during-vacation#0",
+    "parental-leave-policy#entitlement-and-notice#0",
+    "parental-leave-policy#part-time-during-leave#0",
+    "parental-leave-policy#eligibility-and-benefit-interactions#0",
+    "expense-policy#receipts-and-submission#0",
+    "expense-policy#late-submissions#0",
+    "it-access-policy#vpn-access#0",
+    "it-access-policy#password-self-service#0",
+    "it-access-policy#software-licenses#0",
+    "it-access-policy#security-incidents#0",
+}
+
+
+def test_the_full_chunk_id_set_is_pinned_as_ground_truth():
+    all_ids = {
+        chunk.id
+        for policy_id, policy in read_policies().items()
+        for chunk in CHUNKER.chunk(policy_id, policy.text)
+    }
+
+    assert all_ids == EXPECTED_CHUNK_IDS
