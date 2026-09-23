@@ -12,8 +12,10 @@ of four outcomes: **resolve**, **propose an action** into a human approval queue
 **Decision Record**: a persisted, structured account of why the agent did what it did.
 All data is synthetic.
 
-**Status: early.** Project scaffolding and the database schema are in place; the agent
-does not handle requests yet. The table below marks what is wired and what is planned.
+**Status: early.** Project scaffolding, the database schema, and the synthetic HR/IT
+dataset — employees, leave balances, IT outages, and a policy corpus that's chunked
+and embedded — are in place; the agent does not handle requests yet. The table below
+marks what is wired and what is planned.
 
 ## Stack
 
@@ -25,10 +27,10 @@ does not handle requests yet. The table below marks what is wired and what is pl
 | CI | GitHub Actions — ruff + pytest always; eval gate when model secrets are configured | Partial — lint and tests |
 | Packaging | Docker + docker-compose (db, api, ui) | Partial — db only |
 | Orchestration | **LangGraph** | Planned |
-| Model inference | **Azure OpenAI via AI Foundry** — a capable deployment for the agent loop, a small one for classification and claim extraction, `text-embedding-3-small` (1536-dim) | Planned |
+| Model inference | **Azure OpenAI via AI Foundry** — a capable deployment for the agent loop, a small one for classification and claim extraction, `text-embedding-3-small` (1536-dim) | Partial — embeddings only |
 | API | FastAPI | Planned |
 | Retrieval | Metadata pre-filtering → hybrid pgvector cosine + Postgres BM25, reciprocal-rank fusion (k=60), top-5 | Planned |
-| Chunking | Pluggable `Chunker` interface; structural (heading-aware) default, chosen by ablation against fixed-size, recursive and semantic | Planned |
+| Chunking | Pluggable `Chunker` interface; structural (heading-aware) default, chosen by ablation against fixed-size, recursive and semantic | Partial — structural chunker only |
 | MCP | Official Python MCP SDK (FastMCP) exposing the tool belt; stdio + streamable HTTP | Planned |
 | Eval tooling | Own deterministic harness (gates, trajectory, retrieval) + **RAGAS** for answer quality | Planned |
 | Observability | **Langfuse** (cloud keys via `.env`; self-hostable for residency) | Planned |
