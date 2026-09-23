@@ -22,9 +22,12 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import psycopg
 import yaml
+from pgvector.psycopg import register_vector
 
 from support_agent.chunking import StructuralChunker
+from support_agent.db import get_pool
 from support_agent.embeddings import embed_texts
 
 YEAR = 2026
@@ -299,3 +302,37 @@ def render_seed_sql() -> str:
 
 def write_seed_sql(output_path: Path = SEED_SQL_PATH) -> None:
     output_path.write_text(render_seed_sql(), encoding="utf-8", newline="\n")
+
+
+def _load_into(conn: psycopg.Connection, sql: str, embeddings: dict[str, list[float]]) -> None:
+    register_vector(conn)
+    conn.execute("TRUNCATE employees, leave_balances, known_outages, policy_chunks CASCADE")
+    # no params here: psycopg sends a script with no bound parameters as a
+    # single simple-query message, so Postgres itself parses statement
+    # boundaries — unlike a naive split on `;`, that's safe even though some
+    # content (e.g. an outage note) contains a literal semicolon.
+    conn.execute(sql)
+    for chunk_id, vector in embeddings.items():
+        conn.execute("UPDATE policy_chunks SET embedding = %s WHERE id = %s", (vector, chunk_id))
+
+
+def load_seed_data(embed_fn: EmbedFn = embed_texts, conn: psycopg.Connection | None = None) -> None:
+    """Truncate the seeded tables and reload them from a freshly rendered
+    seed, then attach embeddings from the on-disk cache. Truncating first is
+    what makes this safe to re-run — every run starts from the same clean
+    slate rather than accumulating duplicates.
+    """
+    write_seed_sql()
+    sql = SEED_SQL_PATH.read_text(encoding="utf-8")
+    embeddings = embed_policy_chunks(embed_fn=embed_fn)
+
+    if conn is not None:
+        _load_into(conn, sql, embeddings)
+        return
+
+    with get_pool().connection() as pooled_conn:
+        _load_into(pooled_conn, sql, embeddings)
+
+
+if __name__ == "__main__":
+    load_seed_data()

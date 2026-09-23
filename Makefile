@@ -1,4 +1,4 @@
-.PHONY: setup lint format test db-up
+.PHONY: setup lint format test db-up seed
 
 VENV := .venv
 PYTHON := $(VENV)/bin/python
@@ -20,3 +20,7 @@ format:
 
 test:
 	$(PYTHON) -m pytest
+
+# generate, truncate, load — safe to re-run any time
+seed:
+	$(PYTHON) -m data.generate

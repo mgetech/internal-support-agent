@@ -11,6 +11,7 @@ from data.generate import (
     generate_known_outages,
     generate_leave_balances,
     generate_policy_chunks,
+    load_seed_data,
     read_policies,
     render_seed_sql,
     write_seed_sql,
@@ -209,3 +210,27 @@ def test_write_seed_sql_matches_render(tmp_path):
     write_seed_sql(output)
 
     assert output.read_text(encoding="utf-8") == render_seed_sql()
+
+
+def _fake_embed(texts):
+    return [[0.0] * 1536 for _ in texts]
+
+
+def test_load_seed_data_populates_every_seeded_table(clean_db):
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db)
+
+    assert clean_db.execute("SELECT count(*) FROM employees").fetchone()[0] == 12
+    assert clean_db.execute("SELECT count(*) FROM known_outages").fetchone()[0] == 2
+    assert clean_db.execute("SELECT count(*) FROM policy_chunks").fetchone()[0] == 16
+    missing = clean_db.execute(
+        "SELECT count(*) FROM policy_chunks WHERE embedding IS NULL"
+    ).fetchone()[0]
+    assert missing == 0
+
+
+def test_load_seed_data_is_safe_to_run_twice(clean_db):
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db)
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db)
+
+    assert clean_db.execute("SELECT count(*) FROM employees").fetchone()[0] == 12
+    assert clean_db.execute("SELECT count(*) FROM policy_chunks").fetchone()[0] == 16
