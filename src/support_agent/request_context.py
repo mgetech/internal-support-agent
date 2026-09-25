@@ -20,7 +20,22 @@ class RequestContext:
     channel: Channel
 
 
+class NoRequestContextError(RuntimeError):
+    """Raised when identity is read outside a bound request."""
+
+
 _current: ContextVar[RequestContext | None] = ContextVar("request_context", default=None)
+
+
+def get_request_context() -> RequestContext:
+    """The context bound for this request. Raises instead of defaulting when none is bound."""
+    ctx = _current.get()
+    if ctx is None:
+        raise NoRequestContextError(
+            "no request context is bound; the transport must call bind_request_context() "
+            "before any tool runs"
+        )
+    return ctx
 
 
 @contextmanager
