@@ -12,10 +12,12 @@ of four outcomes: **resolve**, **propose an action** into a human approval queue
 **Decision Record**: a persisted, structured account of why the agent did what it did.
 All data is synthetic.
 
-**Status: early.** Project scaffolding, the database schema, and the synthetic HR/IT
+**Status: early.** Project scaffolding, the database schema, the synthetic HR/IT
 dataset — employees, leave balances, IT outages, and a policy corpus that's chunked
-and embedded — are in place; the agent does not handle requests yet. The table below
-marks what is wired and what is planned.
+and embedded — and the identity seam (a per-request context that carries the
+authenticated employee, plus an audit log writer that reads it) are in place; the
+agent does not handle requests yet. The table below marks what is wired and what is
+planned.
 
 ## Stack
 
