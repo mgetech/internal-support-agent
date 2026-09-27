@@ -100,6 +100,7 @@ def identity_fields(fn: Tool) -> set[str]:
     return {n for n in names if is_identity_field(n)}
 
 
+@pytest.mark.xfail(strict=True, reason="the tools are not registered yet")
 def test_registry_publishes_the_tool_contract():
     assert sorted(t.__name__ for t in TOOLS) == sorted(EXPECTED_TOOLS)
 

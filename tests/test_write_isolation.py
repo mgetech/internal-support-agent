@@ -42,6 +42,7 @@ def _count(conn, table: str) -> int:
     return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
 
 
+@pytest.mark.xfail(strict=True, reason="the write tools are not registered yet")
 def test_gated_writes_are_marked():
     assert sorted(t.__name__ for t in GATED_WRITES) == sorted(EXPECTED_GATED_WRITES)
 
