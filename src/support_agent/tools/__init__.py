@@ -10,11 +10,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from support_agent.tools.hr_it import get_leave_balance
+from support_agent.tools.hr_it import get_known_outages, get_leave_balance
 
 Tool = Callable[..., str]
 
-TOOLS: list[Tool] = [get_leave_balance]
+TOOLS: list[Tool] = [get_leave_balance, get_known_outages]
 
 
 def gated_write(fn: Tool) -> Tool:
