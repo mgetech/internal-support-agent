@@ -11,9 +11,9 @@ class Settings(BaseSettings):
 
     database_url: str
 
+    # the Azure v1 API base, e.g. https://<resource>.services.ai.azure.com/openai/v1
     azure_openai_endpoint: str
     azure_openai_api_key: str
-    azure_openai_api_version: str
     azure_openai_deployment_agent: str
     azure_openai_deployment_classifier: str
     azure_openai_deployment_embedding: str
