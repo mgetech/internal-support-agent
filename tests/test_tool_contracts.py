@@ -5,16 +5,15 @@ model-visible tool schema may carry a parameter that could name an employee.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import re
-import types
 from collections.abc import Iterator
 from datetime import date
-from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal
 
 import pytest
 from langchain_core.tools import tool as as_langchain_tool
 from mcp.server.mcpserver import MCPServer
+from tests.tool_args import sample_args
 
 from support_agent.request_context import NoRequestContextError
 from support_agent.tools import TOOLS, Tool
@@ -110,32 +109,6 @@ def test_tool_schema_has_no_identity_field(fn: Tool):
     assert identity_fields(fn) == set(), (
         f"{fn.__name__} exposes an identity parameter; read it from the request context"
     )
-
-
-_SAMPLES: dict[Any, Any] = {str: "x", int: 1, float: 1.0, bool: True, date: date(2026, 11, 2)}
-
-
-def _sample(annotation: Any) -> Any:
-    if annotation in _SAMPLES:
-        return _SAMPLES[annotation]
-    origin = get_origin(annotation)
-    if origin is Literal:
-        return get_args(annotation)[0]
-    if origin in (Union, types.UnionType):
-        return _sample(next(a for a in get_args(annotation) if a is not type(None)))
-    raise TypeError(f"no sample value for parameter type {annotation!r}")
-
-
-def sample_args(fn: Tool) -> dict[str, Any]:
-    """Plausible values for every required parameter, derived from the signature so
-    the unbound-context tests stay generic over the registry.
-    """
-    hints = get_type_hints(fn)
-    return {
-        name: _sample(hints[name])
-        for name, param in inspect.signature(fn).parameters.items()
-        if param.default is inspect.Parameter.empty
-    }
 
 
 @pytest.mark.parametrize("fn", TOOLS, ids=lambda t: t.__name__)

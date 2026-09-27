@@ -14,4 +14,15 @@ Tool = Callable[..., str]
 
 TOOLS: list[Tool] = []
 
-__all__ = ["TOOLS", "Tool"]
+
+def gated_write(fn: Tool) -> Tool:
+    """Mark a tool that proposes a change into `pending_actions` instead of making it."""
+    fn.gated_write = True  # type: ignore[attr-defined]
+    return fn
+
+
+def is_gated_write(fn: Tool) -> bool:
+    return getattr(fn, "gated_write", False)
+
+
+__all__ = ["TOOLS", "Tool", "gated_write", "is_gated_write"]
