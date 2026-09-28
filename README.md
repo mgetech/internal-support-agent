@@ -12,12 +12,22 @@ of four outcomes: **resolve**, **propose an action** into a human approval queue
 **Decision Record**: a persisted, structured account of why the agent did what it did.
 All data is synthetic.
 
-**Status: early.** Project scaffolding, the database schema, the synthetic HR/IT
-dataset — employees, leave balances, IT outages, and a policy corpus that's chunked
-and embedded — and the identity seam (a per-request context that carries the
-authenticated employee, plus an audit log writer that reads it) are in place; the
-agent does not handle requests yet. The table below marks what is wired and what is
-planned.
+**Status: early.** In place:
+
+- the database schema and the synthetic HR/IT dataset: employees, leave balances, IT
+  outages, and a policy corpus that is chunked and embedded
+- the identity seam: a per-request context that carries the authenticated employee,
+  and an audit log writer that reads it
+- the tool belt: leave balance, known outages, hybrid policy search, and two gated
+  writes (leave request, IT ticket). The gated writes check their rules in code and
+  only add a row to the approval queue; a repeated request returns the one already
+  waiting. Every call is audited and recorded as evidence for the request.
+- tests that enforce the permission model for every registered tool: no tool
+  accepts an employee identifier, no tool runs without a request context, and gated
+  writes touch nothing but the approval queue
+
+The agent does not handle requests yet. The table below marks what is wired and what
+is planned.
 
 ## Stack
 
@@ -31,7 +41,7 @@ planned.
 | Orchestration | **LangGraph** | Planned |
 | Model inference | **Azure OpenAI via AI Foundry** — a capable deployment for the agent loop, a small one for classification and claim extraction, `text-embedding-3-small` (1536-dim) | Partial — embeddings only |
 | API | FastAPI | Planned |
-| Retrieval | Metadata pre-filtering → hybrid pgvector cosine + Postgres BM25, reciprocal-rank fusion (k=60), top-5 | Planned |
+| Retrieval | Metadata pre-filtering → hybrid pgvector cosine + Postgres full-text ranking (`ts_rank_cd`), reciprocal-rank fusion (k=60), top-5 | Partial — hybrid search in place; metadata pre-filtering planned |
 | Chunking | Pluggable `Chunker` interface; structural (heading-aware) default, chosen by ablation against fixed-size, recursive and semantic | Partial — structural chunker only |
 | MCP | Official Python MCP SDK (FastMCP) exposing the tool belt; stdio + streamable HTTP | Planned |
 | Eval tooling | Own deterministic harness (gates, trajectory, retrieval) + **RAGAS** for answer quality | Planned |

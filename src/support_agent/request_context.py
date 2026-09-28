@@ -7,8 +7,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 Channel = Literal["rest", "mcp"]
 
@@ -18,6 +18,9 @@ class RequestContext:
     employee_id: str
     request_id: str
     channel: Channel
+    # evidence items for this request's Decision Record, in the order they happened.
+    # Tools add to this list; the graph reads it.
+    evidence: list[dict[str, Any]] = field(default_factory=list, compare=False, repr=False)
 
 
 class NoRequestContextError(RuntimeError):

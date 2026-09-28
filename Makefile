@@ -1,7 +1,11 @@
 .PHONY: setup lint format test db-up seed
 
 VENV := .venv
+ifeq ($(OS),Windows_NT)
+PYTHON := $(VENV)/Scripts/python
+else
 PYTHON := $(VENV)/bin/python
+endif
 
 setup:
 	python3 -m venv $(VENV)

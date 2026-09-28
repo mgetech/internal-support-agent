@@ -8,21 +8,21 @@ Identity is never part of it: tools read it from the bound request context.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from support_agent.tools.base import Tool, gated_write, is_gated_write
+from support_agent.tools.hr_it import (
+    create_ticket,
+    get_known_outages,
+    get_leave_balance,
+    submit_leave_request,
+)
+from support_agent.tools.policy_search import search_policies
 
-Tool = Callable[..., str]
-
-TOOLS: list[Tool] = []
-
-
-def gated_write(fn: Tool) -> Tool:
-    """Mark a tool that proposes a change into `pending_actions` instead of making it."""
-    fn.gated_write = True  # type: ignore[attr-defined]
-    return fn
-
-
-def is_gated_write(fn: Tool) -> bool:
-    return getattr(fn, "gated_write", False)
-
+TOOLS: list[Tool] = [
+    get_leave_balance,
+    get_known_outages,
+    search_policies,
+    submit_leave_request,
+    create_ticket,
+]
 
 __all__ = ["TOOLS", "Tool", "gated_write", "is_gated_write"]

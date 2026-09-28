@@ -5,9 +5,8 @@ from support_agent.config import Settings
 
 REQUIRED = {
     "database_url": "postgresql://user:pass@localhost:5432/support_agent",
-    "azure_openai_endpoint": "https://example.openai.azure.com",
+    "azure_openai_endpoint": "https://example.services.ai.azure.com/openai/v1",
     "azure_openai_api_key": "test-key",
-    "azure_openai_api_version": "2024-10-21",
     "azure_openai_deployment_agent": "gpt-4.1",
     "azure_openai_deployment_classifier": "gpt-4.1-mini",
     "azure_openai_deployment_embedding": "text-embedding-3-small",
