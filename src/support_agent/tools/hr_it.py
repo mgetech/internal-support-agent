@@ -80,6 +80,33 @@ def _not_proposed(reason: str, **details: float) -> str:
     return json.dumps({"proposed": False, "reason": reason, **details})
 
 
+def _lock_requester(cur: psycopg.Cursor) -> None:
+    """Make the gated writes of one employee run one at a time. Postgres releases the
+    lock when the transaction ends.
+    """
+    ctx = get_request_context()
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (ctx.employee_id,))
+
+
+def _find_pending(cur: psycopg.Cursor, tool: str, payload: dict[str, Any]) -> int | None:
+    """The id of the requester's request with the same tool and payload that is still
+    waiting for approval, or None if there is no such request.
+    """
+    ctx = get_request_context()
+    row = cur.execute(
+        """
+        SELECT id
+        FROM pending_actions
+        WHERE employee_id = %s AND tool = %s AND payload = %s
+          AND status = 'pending_approval'
+        ORDER BY id
+        LIMIT 1
+        """,
+        (ctx.employee_id, tool, Jsonb(payload)),
+    ).fetchone()
+    return row["id"] if row else None
+
+
 def _propose(cur: psycopg.Cursor, tool: str, payload: dict[str, Any]) -> int:
     """Add one row to pending_actions for the requester and return its id. Every gated
     write saves its request through this function.
@@ -106,6 +133,8 @@ def submit_leave_request(start_date: date, end_date: date, working_days: float) 
 
     The result has "proposed": true if the request was sent. If it has "proposed":
     false, the request was not sent. Tell the requester the "reason" from the result.
+    If "already_sent" is true, the same request was sent before and is still waiting
+    for approval. No new request was made.
     """
     ctx = get_request_context()
 
@@ -121,15 +150,34 @@ def submit_leave_request(start_date: date, end_date: date, working_days: float) 
         )
 
     year = start_date.year
+    payload = {
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "working_days": working_days,
+    }
     with db.transaction() as cur:
-        # lock this employee's balance row, so two requests sent at the same time
-        # can't both pass the check
+        # the lock makes two requests sent at the same time run one after the other,
+        # so they can't both pass the checks below
+        _lock_requester(cur)
+
+        # check for a duplicate before the balance: the first request's days are
+        # already subtracted, so the balance check would refuse the duplicate
+        existing_id = _find_pending(cur, "submit_leave_request", payload)
+        if existing_id is not None:
+            return json.dumps(
+                {
+                    "proposed": True,
+                    "action_id": existing_id,
+                    "status": "pending_approval",
+                    "already_sent": True,
+                }
+            )
+
         balance = cur.execute(
             """
             SELECT entitlement_days, taken_days, pending_days
             FROM leave_balances
             WHERE employee_id = %s AND year = %s
-            FOR UPDATE
             """,
             (ctx.employee_id, year),
         ).fetchone()
@@ -162,21 +210,14 @@ def submit_leave_request(start_date: date, end_date: date, working_days: float) 
                 remaining_days=remaining,
             )
 
-        action_id = _propose(
-            cur,
-            "submit_leave_request",
-            {
-                "start_date": start_date.isoformat(),
-                "end_date": end_date.isoformat(),
-                "working_days": working_days,
-            },
-        )
+        action_id = _propose(cur, "submit_leave_request", payload)
 
     return json.dumps(
         {
             "proposed": True,
             "action_id": action_id,
             "status": "pending_approval",
+            "already_sent": False,
             "working_days": working_days,
             "remaining_after_approval": remaining - working_days,
         }
@@ -202,6 +243,8 @@ def create_ticket(category: TicketCategory, title: str, body: str) -> str:
 
     The result has "proposed": true if the ticket was sent. If it has "proposed":
     false, the ticket was not sent. Tell the requester the "reason" from the result.
+    If "already_sent" is true, the same ticket was sent before and is still waiting
+    for approval. No new ticket was made.
     """
     get_request_context()
 
@@ -209,9 +252,26 @@ def create_ticket(category: TicketCategory, title: str, body: str) -> str:
     if not title or not body:
         return _not_proposed("the ticket needs a title and a body")
 
+    payload = {"category": category, "title": title, "body": body}
     with db.transaction() as cur:
-        action_id = _propose(
-            cur, "create_ticket", {"category": category, "title": title, "body": body}
-        )
+        _lock_requester(cur)
+        existing_id = _find_pending(cur, "create_ticket", payload)
+        if existing_id is not None:
+            return json.dumps(
+                {
+                    "proposed": True,
+                    "action_id": existing_id,
+                    "status": "pending_approval",
+                    "already_sent": True,
+                }
+            )
+        action_id = _propose(cur, "create_ticket", payload)
 
-    return json.dumps({"proposed": True, "action_id": action_id, "status": "pending_approval"})
+    return json.dumps(
+        {
+            "proposed": True,
+            "action_id": action_id,
+            "status": "pending_approval",
+            "already_sent": False,
+        }
+    )
