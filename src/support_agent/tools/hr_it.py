@@ -11,9 +11,9 @@ from typing import Any, Literal
 import psycopg
 from psycopg.types.json import Jsonb
 
-from support_agent import db
+from support_agent import audit, db
 from support_agent.request_context import get_request_context
-from support_agent.tools.base import gated_write
+from support_agent.tools.base import gated_write, record_tool_call
 
 
 def get_leave_balance(year: int = 2026) -> str:
@@ -30,19 +30,28 @@ def get_leave_balance(year: int = 2026) -> str:
         """,
         (ctx.employee_id, year),
     )
+    ref = f"leave_balances:{ctx.employee_id}:{year}"
     if row is None:
+        record_tool_call("get_leave_balance", {"year": year}, f"no balance for {year}", None)
         return json.dumps({"year": year, "error": "no leave balance on record for this year"})
 
     entitlement = float(row["entitlement_days"])
     taken = float(row["taken_days"])
     pending = float(row["pending_days"])
+    remaining = entitlement - taken - pending
+    record_tool_call(
+        "get_leave_balance",
+        {"year": year},
+        f"{remaining} of {entitlement} days left in {year}",
+        ref,
+    )
     return json.dumps(
         {
             "year": year,
             "entitlement_days": entitlement,
             "taken_days": taken,
             "pending_days": pending,
-            "remaining_days": entitlement - taken - pending,
+            "remaining_days": remaining,
         }
     )
 
@@ -61,6 +70,9 @@ def get_known_outages() -> str:
         ORDER BY started_at DESC
         """
     )
+    systems = [r["system"] for r in rows]
+    summary = f"open outages: {', '.join(systems)}" if systems else "no open outages"
+    record_tool_call("get_known_outages", {}, summary, "known_outages")
     return json.dumps(
         {
             "outages": [
@@ -74,10 +86,6 @@ def get_known_outages() -> str:
             ]
         }
     )
-
-
-def _not_proposed(reason: str, **details: float) -> str:
-    return json.dumps({"proposed": False, "reason": reason, **details})
 
 
 def _lock_requester(cur: psycopg.Cursor) -> None:
@@ -108,8 +116,9 @@ def _find_pending(cur: psycopg.Cursor, tool: str, payload: dict[str, Any]) -> in
 
 
 def _propose(cur: psycopg.Cursor, tool: str, payload: dict[str, Any]) -> int:
-    """Add one row to pending_actions for the requester and return its id. Every gated
-    write saves its request through this function.
+    """Add one row to pending_actions for the requester, write an `action_proposed`
+    audit event, and return the new id. Every gated write saves its request through
+    this function.
     """
     ctx = get_request_context()
     row = cur.execute(
@@ -120,6 +129,9 @@ def _propose(cur: psycopg.Cursor, tool: str, payload: dict[str, Any]) -> int:
         """,
         (ctx.request_id, ctx.employee_id, tool, Jsonb(payload)),
     ).fetchone()
+    audit.record(
+        "action_proposed", {"action_id": row["id"], "tool": tool, "payload": payload}, conn=cur
+    )
     return row["id"]
 
 
@@ -136,18 +148,45 @@ def submit_leave_request(start_date: date, end_date: date, working_days: float) 
     If "already_sent" is true, the same request was sent before and is still waiting
     for approval. No new request was made.
     """
+    get_request_context()
+    args = {
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "working_days": working_days,
+    }
+    with db.transaction() as cur:
+        result = _submit_leave_request(cur, start_date, end_date, working_days)
+        if result["proposed"]:
+            action = "already sent" if result["already_sent"] else "proposed"
+            summary = f"{action} {working_days} days, {args['start_date']} to {args['end_date']}"
+            ref = f"pending_actions:{result['action_id']}"
+        else:
+            summary = f"not proposed: {result['reason']}"
+            ref = None
+        record_tool_call("submit_leave_request", args, summary, ref, conn=cur)
+    return json.dumps(result)
+
+
+def _submit_leave_request(
+    cur: psycopg.Cursor, start_date: date, end_date: date, working_days: float
+) -> dict[str, Any]:
+    """The checks and the insert for submit_leave_request. Returns the tool's result."""
     ctx = get_request_context()
 
     if end_date < start_date:
-        return _not_proposed("the end date is before the start date")
+        return {"proposed": False, "reason": "the end date is before the start date"}
     if end_date.year != start_date.year:
-        return _not_proposed("a request cannot span two years; split it at the new year")
+        return {
+            "proposed": False,
+            "reason": "a request cannot span two years; split it at the new year",
+        }
     calendar_days = (end_date - start_date).days + 1
     if not 0 < working_days <= calendar_days:
-        return _not_proposed(
-            "working days must be more than 0 and no more than the days in the range",
-            calendar_days=calendar_days,
-        )
+        return {
+            "proposed": False,
+            "reason": "working days must be more than 0 and no more than the days in the range",
+            "calendar_days": calendar_days,
+        }
 
     year = start_date.year
     payload = {
@@ -155,73 +194,69 @@ def submit_leave_request(start_date: date, end_date: date, working_days: float) 
         "end_date": end_date.isoformat(),
         "working_days": working_days,
     }
-    with db.transaction() as cur:
-        # the lock makes two requests sent at the same time run one after the other,
-        # so they can't both pass the checks below
-        _lock_requester(cur)
 
-        # check for a duplicate before the balance: the first request's days are
-        # already subtracted, so the balance check would refuse the duplicate
-        existing_id = _find_pending(cur, "submit_leave_request", payload)
-        if existing_id is not None:
-            return json.dumps(
-                {
-                    "proposed": True,
-                    "action_id": existing_id,
-                    "status": "pending_approval",
-                    "already_sent": True,
-                }
-            )
+    # the lock makes two requests sent at the same time run one after the other,
+    # so they can't both pass the checks below
+    _lock_requester(cur)
 
-        balance = cur.execute(
-            """
-            SELECT entitlement_days, taken_days, pending_days
-            FROM leave_balances
-            WHERE employee_id = %s AND year = %s
-            """,
-            (ctx.employee_id, year),
-        ).fetchone()
-        if balance is None:
-            return _not_proposed(f"no leave balance on record for {year}")
-
-        # also subtract the days of requests that are still waiting for approval,
-        # because pending_days only includes approved requests
-        awaiting = cur.execute(
-            """
-            SELECT coalesce(sum((payload->>'working_days')::numeric), 0) AS days
-            FROM pending_actions
-            WHERE employee_id = %s AND tool = 'submit_leave_request'
-              AND status = 'pending_approval'
-              AND extract(year FROM (payload->>'start_date')::date) = %s
-            """,
-            (ctx.employee_id, year),
-        ).fetchone()
-
-        remaining = float(
-            balance["entitlement_days"]
-            - balance["taken_days"]
-            - balance["pending_days"]
-            - awaiting["days"]
-        )
-        if working_days > remaining:
-            return _not_proposed(
-                "the request is more than the remaining balance",
-                requested_days=working_days,
-                remaining_days=remaining,
-            )
-
-        action_id = _propose(cur, "submit_leave_request", payload)
-
-    return json.dumps(
-        {
+    # check for a duplicate before the balance: the first request's days are
+    # already subtracted, so the balance check would refuse the duplicate
+    existing_id = _find_pending(cur, "submit_leave_request", payload)
+    if existing_id is not None:
+        return {
             "proposed": True,
-            "action_id": action_id,
+            "action_id": existing_id,
             "status": "pending_approval",
-            "already_sent": False,
-            "working_days": working_days,
-            "remaining_after_approval": remaining - working_days,
+            "already_sent": True,
         }
+
+    balance = cur.execute(
+        """
+        SELECT entitlement_days, taken_days, pending_days
+        FROM leave_balances
+        WHERE employee_id = %s AND year = %s
+        """,
+        (ctx.employee_id, year),
+    ).fetchone()
+    if balance is None:
+        return {"proposed": False, "reason": f"no leave balance on record for {year}"}
+
+    # also subtract the days of requests that are still waiting for approval,
+    # because pending_days only includes approved requests
+    awaiting = cur.execute(
+        """
+        SELECT coalesce(sum((payload->>'working_days')::numeric), 0) AS days
+        FROM pending_actions
+        WHERE employee_id = %s AND tool = 'submit_leave_request'
+          AND status = 'pending_approval'
+          AND extract(year FROM (payload->>'start_date')::date) = %s
+        """,
+        (ctx.employee_id, year),
+    ).fetchone()
+
+    remaining = float(
+        balance["entitlement_days"]
+        - balance["taken_days"]
+        - balance["pending_days"]
+        - awaiting["days"]
     )
+    if working_days > remaining:
+        return {
+            "proposed": False,
+            "reason": "the request is more than the remaining balance",
+            "requested_days": working_days,
+            "remaining_days": remaining,
+        }
+
+    action_id = _propose(cur, "submit_leave_request", payload)
+    return {
+        "proposed": True,
+        "action_id": action_id,
+        "status": "pending_approval",
+        "already_sent": False,
+        "working_days": working_days,
+        "remaining_after_approval": remaining - working_days,
+    }
 
 
 TicketCategory = Literal["access", "hardware", "software", "security"]
@@ -247,31 +282,43 @@ def create_ticket(category: TicketCategory, title: str, body: str) -> str:
     for approval. No new ticket was made.
     """
     get_request_context()
+    args = {"category": category, "title": title, "body": body}
+    with db.transaction() as cur:
+        result = _create_ticket(cur, category, title, body)
+        if result["proposed"]:
+            action = "already sent" if result["already_sent"] else "proposed"
+            summary = f"{action} {category} ticket: {title.strip()}"
+            ref = f"pending_actions:{result['action_id']}"
+        else:
+            summary = f"not proposed: {result['reason']}"
+            ref = None
+        record_tool_call("create_ticket", args, summary, ref, conn=cur)
+    return json.dumps(result)
 
+
+def _create_ticket(
+    cur: psycopg.Cursor, category: TicketCategory, title: str, body: str
+) -> dict[str, Any]:
+    """The checks and the insert for create_ticket. Returns the tool's result."""
     title, body = title.strip(), body.strip()
     if not title or not body:
-        return _not_proposed("the ticket needs a title and a body")
+        return {"proposed": False, "reason": "the ticket needs a title and a body"}
 
     payload = {"category": category, "title": title, "body": body}
-    with db.transaction() as cur:
-        _lock_requester(cur)
-        existing_id = _find_pending(cur, "create_ticket", payload)
-        if existing_id is not None:
-            return json.dumps(
-                {
-                    "proposed": True,
-                    "action_id": existing_id,
-                    "status": "pending_approval",
-                    "already_sent": True,
-                }
-            )
-        action_id = _propose(cur, "create_ticket", payload)
-
-    return json.dumps(
-        {
+    _lock_requester(cur)
+    existing_id = _find_pending(cur, "create_ticket", payload)
+    if existing_id is not None:
+        return {
             "proposed": True,
-            "action_id": action_id,
+            "action_id": existing_id,
             "status": "pending_approval",
-            "already_sent": False,
+            "already_sent": True,
         }
-    )
+
+    action_id = _propose(cur, "create_ticket", payload)
+    return {
+        "proposed": True,
+        "action_id": action_id,
+        "status": "pending_approval",
+        "already_sent": False,
+    }

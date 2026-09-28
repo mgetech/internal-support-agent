@@ -9,6 +9,7 @@ import json
 from support_agent import db
 from support_agent.embeddings import embed_texts
 from support_agent.request_context import get_request_context
+from support_agent.tools.base import record_tool_call
 
 RRF_K = 60
 CANDIDATES_PER_RANKING = 20
@@ -62,6 +63,8 @@ def search_policies(query: str) -> str:
     )
 
     top = fuse([[r["id"] for r in by_vector], [r["id"] for r in by_keyword]])[:TOP_K]
+    summary = f"{len(top)} chunks found" if top else "no chunks found"
+    record_tool_call("search_policies", {"query": query}, summary, top)
     if not top:
         return json.dumps({"results": []})
 
