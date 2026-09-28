@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from typing import Any, Literal
 
+import psycopg
 from psycopg.types.json import Jsonb
 
 from support_agent import db
@@ -78,6 +80,22 @@ def _not_proposed(reason: str, **details: float) -> str:
     return json.dumps({"proposed": False, "reason": reason, **details})
 
 
+def _propose(cur: psycopg.Cursor, tool: str, payload: dict[str, Any]) -> int:
+    """Add one row to pending_actions for the requester and return its id. Every gated
+    write saves its request through this function.
+    """
+    ctx = get_request_context()
+    row = cur.execute(
+        """
+        INSERT INTO pending_actions (request_id, employee_id, tool, payload)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id
+        """,
+        (ctx.request_id, ctx.employee_id, tool, Jsonb(payload)),
+    ).fetchone()
+    return row["id"]
+
+
 @gated_write
 def submit_leave_request(start_date: date, end_date: date, working_days: float) -> str:
     """Send the requester's vacation request to an approver. This does not book the
@@ -144,26 +162,56 @@ def submit_leave_request(start_date: date, end_date: date, working_days: float) 
                 remaining_days=remaining,
             )
 
-        payload = {
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "working_days": working_days,
-        }
-        action = cur.execute(
-            """
-            INSERT INTO pending_actions (request_id, employee_id, tool, payload)
-            VALUES (%s, %s, 'submit_leave_request', %s)
-            RETURNING id
-            """,
-            (ctx.request_id, ctx.employee_id, Jsonb(payload)),
-        ).fetchone()
+        action_id = _propose(
+            cur,
+            "submit_leave_request",
+            {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "working_days": working_days,
+            },
+        )
 
     return json.dumps(
         {
             "proposed": True,
-            "action_id": action["id"],
+            "action_id": action_id,
             "status": "pending_approval",
             "working_days": working_days,
             "remaining_after_approval": remaining - working_days,
         }
     )
+
+
+TicketCategory = Literal["access", "hardware", "software", "security"]
+
+
+@gated_write
+def create_ticket(category: TicketCategory, title: str, body: str) -> str:
+    """Send the requester's IT ticket to an approver. This does not open the ticket.
+    An approver must approve it first.
+
+    category: "access" for accounts and permissions, "hardware" for devices,
+    "software" for programs and licenses, "security" for anything that may be a
+    security problem.
+    title: one short line that says what the problem is.
+    body: the details from the requester.
+
+    Before you call this, check get_known_outages. If the problem is a known outage,
+    tell the requester about the outage instead of creating a ticket.
+
+    The result has "proposed": true if the ticket was sent. If it has "proposed":
+    false, the ticket was not sent. Tell the requester the "reason" from the result.
+    """
+    get_request_context()
+
+    title, body = title.strip(), body.strip()
+    if not title or not body:
+        return _not_proposed("the ticket needs a title and a body")
+
+    with db.transaction() as cur:
+        action_id = _propose(
+            cur, "create_ticket", {"category": category, "title": title, "body": body}
+        )
+
+    return json.dumps({"proposed": True, "action_id": action_id, "status": "pending_approval"})
