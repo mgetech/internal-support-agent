@@ -137,3 +137,12 @@ def test_committed_prompts_match_committed_checksums():
     recorded = json.loads(CHECKSUMS_FILE.read_text(encoding="utf-8"))
 
     assert version_problems(load_prompts(), recorded) == []
+
+
+def test_agent_prompt_has_the_seven_rules_in_order():
+    text = load_prompts()["agent_system"].text
+    rule_starts = [text.find(f"\n{n}. ") for n in range(1, 8)]
+
+    assert -1 not in rule_starts
+    assert rule_starts == sorted(rule_starts)
+    assert "\n8. " not in text
