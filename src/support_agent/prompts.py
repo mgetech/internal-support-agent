@@ -7,6 +7,8 @@ payload and Decision Record, so a result can be traced back to the exact version
 
 from __future__ import annotations
 
+import hashlib
+import json
 from functools import lru_cache
 from pathlib import Path
 
@@ -14,6 +16,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, field_validator
 
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "prompts"
+CHECKSUMS_FILE = PROMPTS_DIR / "checksums.json"
 
 
 class Prompt(BaseModel):
@@ -79,3 +82,42 @@ def prompt_versions() -> dict[str, str]:
     prompt-version set they ran against.
     """
     return {prompt_id: prompt.version for prompt_id, prompt in sorted(_registry().items())}
+
+
+def checksums(loaded: dict[str, Prompt]) -> dict[str, dict[str, str]]:
+    """The version and a SHA-256 hash of the text for each prompt."""
+    result = {}
+    for prompt_id, prompt in sorted(loaded.items()):
+        result[prompt_id] = {
+            "version": prompt.version,
+            "sha256": hashlib.sha256(prompt.text.encode("utf-8")).hexdigest(),
+        }
+    return result
+
+
+def version_problems(loaded: dict[str, Prompt], recorded: dict[str, dict[str, str]]) -> list[str]:
+    """Compare the loaded prompts with the committed checksums. Returns one message
+    for each problem. An empty list means every text change has a version bump.
+    """
+    update = "run `python -m support_agent.prompts` to update prompts/checksums.json"
+    problems = []
+    for prompt_id, current in checksums(loaded).items():
+        old = recorded.get(prompt_id)
+        if old is None:
+            problems.append(f"{prompt_id}: no recorded checksum, {update}")
+        elif current["sha256"] != old["sha256"] and current["version"] == old["version"]:
+            problems.append(
+                f"{prompt_id}: the text changed but the version is still {old['version']}. "
+                f"Bump the version, then {update}"
+            )
+        elif current != old:
+            problems.append(f"{prompt_id}: checksums.json is out of date, {update}")
+    problems.extend(
+        f"{prompt_id}: recorded in checksums.json but the prompt is gone, {update}"
+        for prompt_id in sorted(set(recorded) - set(loaded))
+    )
+    return problems
+
+
+if __name__ == "__main__":
+    CHECKSUMS_FILE.write_text(json.dumps(checksums(load_prompts()), indent=2) + "\n")

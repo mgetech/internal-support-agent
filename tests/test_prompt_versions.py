@@ -1,10 +1,19 @@
+import json
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from support_agent import prompts
-from support_agent.prompts import Prompt, get_prompt, load_prompts, prompt_versions
+from support_agent.prompts import (
+    CHECKSUMS_FILE,
+    Prompt,
+    checksums,
+    get_prompt,
+    load_prompts,
+    prompt_versions,
+    version_problems,
+)
 
 
 def _write(directory: Path, name: str, **overrides: str) -> None:
@@ -81,3 +90,50 @@ def test_prompt_versions_lists_every_prompt(monkeypatch, tmp_path):
     monkeypatch.setattr(prompts, "_registry", lambda: load_prompts(tmp_path))
 
     assert prompt_versions() == {"alpha": "1.0.0", "beta": "0.3.0"}
+
+
+def _prompt(text="Answer the question.", version="1.0.0") -> dict[str, Prompt]:
+    return {"alpha": Prompt(id="alpha", version=version, text=text, changelog="change")}
+
+
+def test_unchanged_prompt_has_no_problems():
+    assert version_problems(_prompt(), checksums(_prompt())) == []
+
+
+def test_text_edit_without_version_bump_fails():
+    recorded = checksums(_prompt())
+
+    problems = version_problems(_prompt(text="Answer briefly."), recorded)
+
+    assert len(problems) == 1
+    assert "the text changed but the version is still 1.0.0" in problems[0]
+    assert "Bump the version" in problems[0]
+
+
+def test_text_edit_with_bump_asks_to_update_checksums():
+    recorded = checksums(_prompt())
+
+    problems = version_problems(_prompt(text="Answer briefly.", version="1.0.1"), recorded)
+
+    assert len(problems) == 1
+    assert "checksums.json is out of date" in problems[0]
+
+
+def test_new_prompt_needs_a_recorded_checksum():
+    problems = version_problems(_prompt(), {})
+
+    assert len(problems) == 1
+    assert "no recorded checksum" in problems[0]
+
+
+def test_removed_prompt_is_reported():
+    problems = version_problems({}, checksums(_prompt()))
+
+    assert len(problems) == 1
+    assert "the prompt is gone" in problems[0]
+
+
+def test_committed_prompts_match_committed_checksums():
+    recorded = json.loads(CHECKSUMS_FILE.read_text(encoding="utf-8"))
+
+    assert version_problems(load_prompts(), recorded) == []
