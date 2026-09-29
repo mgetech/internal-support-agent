@@ -12,22 +12,48 @@ of four outcomes: **resolve**, **propose an action** into a human approval queue
 **Decision Record**: a persisted, structured account of why the agent did what it did.
 All data is synthetic.
 
-**Status: early.** In place:
+## Status
 
-- the database schema and the synthetic HR/IT dataset: employees, leave balances, IT
-  outages, and a policy corpus that is chunked and embedded
-- the identity seam: a per-request context that carries the authenticated employee,
-  and an audit log writer that reads it
-- the tool belt: leave balance, known outages, hybrid policy search, and two gated
-  writes (leave request, IT ticket). The gated writes check their rules in code and
-  only add a row to the approval queue; a repeated request returns the one already
-  waiting. Every call is audited and recorded as evidence for the request.
-- tests that enforce the permission model for every registered tool: no tool
-  accepts an employee identifier, no tool runs without a request context, and gated
-  writes touch nothing but the approval queue
+**Early.** The agent does not answer requests yet. What exists today:
 
-The agent does not handle requests yet. The table below marks what is wired and what
-is planned.
+- **Data.** 12 synthetic employees with leave balances, two IT outages, and five HR/IT
+  policies. The policies are split into sections and embedded for search.
+- **Identity.** Each request carries the logged-in employee. Tools read the employee
+  from there. No tool takes an employee id as input.
+- **Tools.** The five tools the agent will use:
+  - `get_leave_balance`: the employee's own vacation days
+  - `get_known_outages`: IT outages that are still open
+  - `search_policies`: finds policy sections by meaning and by keywords
+  - `submit_leave_request` and `create_ticket`: these do not book leave or open a
+    ticket. They check the rules in code, then add the request to a queue for a
+    human to approve. Sending the same request twice returns the first one.
+- **Audit log.** Every tool call and every proposed action is saved with the request
+  id and who made it.
+- **Security tests.** They run for every tool: no tool takes an employee id, no tool
+  runs without a logged-in employee, and write tools only add to the approval queue.
+
+The Stack table below shows which parts are built and which are planned.
+
+## Roadmap
+
+Rough build order:
+
+- **Walking skeleton** — deterministic synthetic HR/IT data and a heading-aware chunker;
+  session-bound identity and a full audit trail; the typed tool belt, with its
+  access-control tests written before the tools they constrain; the agent graph,
+  citation verifier and Decision Records; role-checked human approval behind a REST
+  API; a Streamlit review surface.
+- **Evaluation gate** — scenarios with authored expected outcomes, run n=3 and wired
+  into CI, so a change that makes the agent behave worse fails the build. Prompts are
+  versioned config: a wording change without a version bump is a test failure.
+- **Depth** — the same tool belt over MCP, with identity bound at session
+  initialization rather than passed as an argument; adversarial scenarios (prompt
+  injection, colleague-data probing, approval bypass); retrieval evaluation and the
+  chunking ablation, with tables published.
+- **Governance** — DSAR export, retention purge, and a database-level assertion that no
+  record was ever written without passing through human approval.
+- **Observability and feedback** — per-node traces with cost and latency budgets, a
+  usage dashboard, and a path that turns a thumbs-down into a new eval scenario.
 
 ## Stack
 
@@ -47,24 +73,3 @@ is planned.
 | Eval tooling | Own deterministic harness (gates, trajectory, retrieval) + **RAGAS** for answer quality | Planned |
 | Observability | **Langfuse** (cloud keys via `.env`; self-hostable for residency) | Planned |
 | UI | Streamlit — chat, approval queue, decision records, cost | Planned |
-
-## Roadmap
-
-Rough build order; the table above says what exists today.
-
-- **Walking skeleton** — deterministic synthetic HR/IT data and a heading-aware chunker;
-  session-bound identity and a full audit trail; the typed tool belt, with its
-  access-control tests written before the tools they constrain; the agent graph,
-  citation verifier and Decision Records; role-checked human approval behind a REST
-  API; a Streamlit review surface.
-- **Evaluation gate** — scenarios with authored expected outcomes, run n=3 and wired
-  into CI, so a change that makes the agent behave worse fails the build. Prompts are
-  versioned config: a wording change without a version bump is a test failure.
-- **Depth** — the same tool belt over MCP, with identity bound at session
-  initialization rather than passed as an argument; adversarial scenarios (prompt
-  injection, colleague-data probing, approval bypass); retrieval evaluation and the
-  chunking ablation, with tables published.
-- **Governance** — DSAR export, retention purge, and a database-level assertion that no
-  record was ever written without passing through human approval.
-- **Observability and feedback** — per-node traces with cost and latency budgets, a
-  usage dashboard, and a path that turns a thumbs-down into a new eval scenario.
