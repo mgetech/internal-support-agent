@@ -50,7 +50,7 @@ def model_calls(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def request_totals(evidence: list[dict[str, Any]]) -> Totals:
+def request_total_cost(evidence: list[dict[str, Any]]) -> Totals:
     """The total tokens (input plus output) and total cost of a request."""
     calls = model_calls(evidence)
     tokens = sum(call["input_tokens"] + call["output_tokens"] for call in calls)
