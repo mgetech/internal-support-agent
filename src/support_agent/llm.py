@@ -7,7 +7,8 @@ On Azure, `model` is the name of the deployment.
 
 Every try, every switch to the fallback model and the final failure adds an evidence
 item to the request and a `model_call` audit event. The item's `type` tells them apart.
-The whole chain can be read back from the Decision Record.
+The whole chain can be read back from the Decision Record. A successful try also
+carries its token counts and its cost in EUR.
 
 The retry rules follow the OpenAI SDK: retry on connection errors and on status 408,
 409, 429 and 5xx. The SDK's own retries are turned off, so the limit is only in this file.
@@ -25,6 +26,7 @@ from openai.types.responses import Response
 
 from support_agent import audit
 from support_agent.config import get_settings
+from support_agent.costing import PriceTable, call_cost_eur, validate_prices
 from support_agent.prompts import Prompt
 from support_agent.request_context import get_request_context
 
@@ -55,12 +57,14 @@ class LLMClient:
     def __init__(
         self,
         client: OpenAI,
+        price_table: PriceTable,
         fallback_model: str = "",
         max_retries: int = MAX_RETRIES,
         retry_delay: float = INITIAL_RETRY_DELAY,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._client = client
+        self._price_table = price_table
         self._fallback = fallback_model
         self._max_retries = max_retries
         self._retry_delay = retry_delay
@@ -133,9 +137,13 @@ class LLMClient:
         if error is not None:
             item["error"] = f"{type(error).__name__}: {error}"[:200]
             item["status_code"] = getattr(error, "status_code", None)
-        if response is not None and response.usage is not None:
-            item["input_tokens"] = response.usage.input_tokens
-            item["output_tokens"] = response.usage.output_tokens
+        if response is not None:
+            usage = response.usage
+            item["input_tokens"] = usage.input_tokens if usage else 0
+            item["output_tokens"] = usage.output_tokens if usage else 0
+            item["cost_eur"] = call_cost_eur(
+                self._price_table, model, item["input_tokens"], item["output_tokens"]
+            )
         self._add_audit_and_evidence(item)
 
     def _add_audit_and_evidence(self, item: dict[str, Any]) -> None:
@@ -149,10 +157,16 @@ def get_llm_client() -> LLMClient:
     model from settings.
     """
     settings = get_settings()
+    models = [settings.azure_openai_deployment_agent, settings.azure_openai_deployment_classifier]
+    if settings.model_fallback_deployment:
+        models.append(settings.model_fallback_deployment)
+    validate_prices(settings.price_table_eur, models)
     client = OpenAI(
         base_url=settings.azure_openai_endpoint,
         api_key=settings.azure_openai_api_key,
         max_retries=0,
         timeout=TIMEOUT_SECONDS,
     )
-    return LLMClient(client, fallback_model=settings.model_fallback_deployment)
+    return LLMClient(
+        client, settings.price_table_eur, fallback_model=settings.model_fallback_deployment
+    )
