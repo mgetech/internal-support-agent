@@ -31,6 +31,16 @@ All data is synthetic.
   id and who made it.
 - **Security tests.** They run for every tool: no tool takes an employee id, no tool
   runs without a logged-in employee, and write tools only add to the approval queue.
+- **Prompts.** The agent prompt and the classifier prompt are files in `prompts/`. Each
+  has an **id** and a **version**. A test fails if a prompt's text changes and its version does
+  not.
+- **Model client.** Calls go to Azure OpenAI through the **Responses API**. A failed call is
+  tried again after a short wait. If it keeps failing, the client tries a fallback model,
+  when one is set. If every model fails, it raises an error. The graph that ends the
+  request with `escalate` is not built yet. Every try is saved in the audit log and in
+  the request's evidence.
+- **Cost.** Each successful model call gets its token counts and its cost in euros, from
+  a price table in the settings. Creating the client fails if a model has no price.
 
 The Stack table below shows which parts are built and which are planned.
 
@@ -65,7 +75,7 @@ Rough build order:
 | CI | GitHub Actions — ruff + pytest always; eval gate when model secrets are configured | Partial — lint and tests |
 | Packaging | Docker + docker-compose (db, api, ui) | Partial — db only |
 | Orchestration | **LangGraph** | Planned |
-| Model inference | **Azure OpenAI via AI Foundry** — a capable deployment for the agent loop, a small one for classification and claim extraction, `text-embedding-3-small` (1536-dim) | Partial — embeddings only |
+| Model inference | **Azure OpenAI via AI Foundry** — a capable deployment for the agent loop, a small one for classification and claim extraction, `text-embedding-3-small` (1536-dim) | Partial — embeddings, and a model client with retry, fallback and cost; no agent uses it yet |
 | API | FastAPI | Planned |
 | Retrieval | Metadata pre-filtering → hybrid pgvector cosine + Postgres full-text ranking (`ts_rank_cd`), reciprocal-rank fusion (k=60), top-5 | Partial — hybrid search in place; metadata pre-filtering planned |
 | Chunking | Pluggable `Chunker` interface; structural (heading-aware) default, chosen by ablation against fixed-size, recursive and semantic | Partial — structural chunker only |
