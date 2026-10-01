@@ -12,13 +12,16 @@ from langgraph.graph.message import add_messages
 
 Family = Literal["hr", "it", "other"]
 Risk = Literal["read", "write", "out_of_scope"]
+Language = Literal["de", "en"]
 Outcome = Literal["resolve", "propose_action", "escalate", "refuse_with_citation"]
 
 
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
+    # family, risk and language are set once, by the classify node
     family: Family
     risk: Risk
+    language: Language
     # the citation whitelist: every chunk id a search_policies call returned in this request
     retrieved_chunk_ids: Annotated[list[str], operator.add]
     proposed_action_ids: Annotated[list[int], operator.add]
