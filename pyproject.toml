@@ -14,6 +14,7 @@ dependencies = [
     "pydantic==2.13.5",
     "pydantic-settings==2.15.0",
     "langgraph==1.2.11",
+    "langchain-core==1.6.3",
     "openai==3.16.2",
     "psycopg[binary]==3.3.6",
     "psycopg-pool==3.3.2",

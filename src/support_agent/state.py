@@ -7,7 +7,7 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, Literal, TypedDict
 
-from langchain_core.messages import AnyMessage
+from langchain_core.messages import AnyMessage, HumanMessage
 from langgraph.graph.message import add_messages
 
 Family = Literal["hr", "it", "other"]
@@ -31,3 +31,16 @@ class AgentState(TypedDict):
     verifier_objection: str | None
     # ordered evidence items for the Decision Record
     decision_evidence: Annotated[list[dict[str, Any]], operator.add]
+
+
+def new_state(text: str) -> AgentState:
+    """The state a request starts with: the employee's message and empty accumulators."""
+    return {
+        "messages": [HumanMessage(text)],
+        "retrieved_chunk_ids": [],
+        "proposed_action_ids": [],
+        "tool_calls_used": 0,
+        "outcome": None,
+        "verifier_objection": None,
+        "decision_evidence": [],
+    }
