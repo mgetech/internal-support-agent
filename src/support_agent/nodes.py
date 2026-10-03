@@ -18,6 +18,7 @@ from langgraph.prebuilt import ToolNode
 from openai.types.responses import Response
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from support_agent.config import DEFAULT_MAX_TOOL_CALLS_PER_REQUEST
 from support_agent.llm import LLMClient, LLMUnavailableError
 from support_agent.prompts import get_prompt
 from support_agent.request_context import get_request_context
@@ -111,7 +112,7 @@ def route_after_classify(state: AgentState) -> Literal["agent", "refuse"]:
     return "refuse" if state.get("outcome") == "escalate" else "agent"
 
 
-def refuse(state: AgentState) -> dict[str, Any]:
+def refuse_node(state: AgentState) -> dict[str, Any]:
     """Tell the employee a person can take over, in the language of the request."""
     text = REFUSAL_TEXT[state.get("language", DEFAULT_LANGUAGE)]
     return {"messages": [AIMessage(text)], "outcome": "escalate"}
@@ -199,12 +200,43 @@ def agent_node(
     return agent
 
 
-def route_after_agent(state: AgentState) -> Literal["tools", "verify", "refuse"]:
+def route_after_agent(
+    state: AgentState, max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_REQUEST
+) -> Literal["tools", "verify", "tool_limit_reached", "refuse"]:
+    """Decide what runs after the agent node.
+
+    A reply with tool calls goes to `tools`, unless running them would use more than
+    `max_tool_calls` in total. The calls of one reply are never cut to fit: either all
+    of them run or none of them does.
+    """
     if state.get("outcome") == "escalate":
         return "refuse"
-    if state["messages"][-1].tool_calls:
-        return "tools"
-    return "verify"
+    requested_calls = state["messages"][-1].tool_calls
+    if not requested_calls:
+        return "verify"
+    if state["tool_calls_used"] + len(requested_calls) > max_tool_calls:
+        return "tool_limit_reached"
+    return "tools"
+
+
+def tool_limit_node(
+    state: AgentState, max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_REQUEST
+) -> dict[str, Any]:
+    """End the request with escalate because the tool limit is reached. The requested
+    calls are not run. The `refuse` node then writes the answer.
+    """
+    ctx = get_request_context()
+    start = len(ctx.evidence)
+    ctx.evidence.append(
+        {
+            "type": "tool_limit",
+            "tool_calls_used": state["tool_calls_used"],
+            "tool_calls_requested": len(state["messages"][-1].tool_calls),
+            "limit": max_tool_calls,
+        }
+    )
+    ctx.evidence.append({"type": "escalation", "reason": "tool_limit_reached"})
+    return {"outcome": "escalate", "decision_evidence": _evidence_since(start)}
 
 
 def tools_node(tools: Sequence[Tool]) -> Callable[[AgentState], dict[str, Any]]:

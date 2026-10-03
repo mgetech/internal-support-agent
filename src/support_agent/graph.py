@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import partial
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from support_agent.config import DEFAULT_MAX_TOOL_CALLS_PER_REQUEST
 from support_agent.llm import LLMClient
 from support_agent.nodes import (
     agent_node,
     classify_node,
-    refuse,
+    refuse_node,
     route_after_agent,
     route_after_classify,
+    tool_limit_node,
     tools_node,
 )
 from support_agent.state import AgentState
@@ -25,20 +28,32 @@ def build_graph(
     classifier_model: str,
     agent_model: str,
     tools: Sequence[Tool] = TOOLS,
+    max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_REQUEST,
 ) -> CompiledStateGraph:
-    """classify -> agent <-> tools. Out-of-scope requests and failures go to refuse."""
+    """classify -> agent <-> tools. Out-of-scope requests, failures and an exhausted
+    tool limit (`max_tool_calls`) end in refuse.
+    """
     graph = StateGraph(AgentState)
     graph.add_node("classify", classify_node(llm, classifier_model))
-    graph.add_node("refuse", refuse)
+    graph.add_node("refuse", refuse_node)
     graph.add_node("agent", agent_node(llm, agent_model, tools))
     graph.add_node("tools", tools_node(tools))
+    graph.add_node("tool_limit_reached", partial(tool_limit_node, max_tool_calls=max_tool_calls))
 
     graph.add_edge(START, "classify")
     graph.add_conditional_edges("classify", route_after_classify, ["agent", "refuse"])
     # a reply without tool calls ends the graph until the verify node exists
     graph.add_conditional_edges(
-        "agent", route_after_agent, {"tools": "tools", "verify": END, "refuse": "refuse"}
+        "agent",
+        partial(route_after_agent, max_tool_calls=max_tool_calls),
+        {
+            "tools": "tools",
+            "verify": END,
+            "tool_limit_reached": "tool_limit_reached",
+            "refuse": "refuse",
+        },
     )
     graph.add_edge("tools", "agent")
+    graph.add_edge("tool_limit_reached", "refuse")
     graph.add_edge("refuse", END)
     return graph.compile()

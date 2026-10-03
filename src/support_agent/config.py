@@ -5,6 +5,8 @@ from __future__ import annotations
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_MAX_TOOL_CALLS_PER_REQUEST = 8
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -20,7 +22,7 @@ class Settings(BaseSettings):
     # empty string means no fallback is configured
     model_fallback_deployment: str = ""
 
-    max_tool_calls_per_request: int = 8
+    max_tool_calls_per_request: int = DEFAULT_MAX_TOOL_CALLS_PER_REQUEST
 
     # {"<deployment>": {"input_per_1k": eur, "output_per_1k": eur}} — embedding
     # deployments carry input_per_1k only. Read by costing.py.

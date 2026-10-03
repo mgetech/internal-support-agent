@@ -12,9 +12,10 @@ from support_agent.nodes import (
     CLASSIFICATION_FORMAT,
     REFUSAL_TEXT,
     classify_node,
-    refuse,
+    refuse_node,
     route_after_agent,
     route_after_classify,
+    tool_limit_node,
 )
 from support_agent.prompts import get_prompt
 from support_agent.request_context import bind_request_context, get_request_context
@@ -173,14 +174,14 @@ def test_out_of_scope_goes_to_refusal_and_ends_with_escalate():
     assert evidence[-1] == {"type": "escalation", "reason": "out_of_scope"}
     assert route_after_classify(state_update) == "refuse"
 
-    final = refuse(state_update)
+    final = refuse_node(state_update)
 
     assert final["outcome"] == "escalate"
     assert final["messages"][0].content == REFUSAL_TEXT["en"]
 
 
 def test_the_refusal_is_in_the_language_of_the_request():
-    final = refuse({"risk": "out_of_scope", "language": "de"})
+    final = refuse_node({"risk": "out_of_scope", "language": "de"})
 
     assert final["messages"][0].content == REFUSAL_TEXT["de"]
 
@@ -213,14 +214,14 @@ def test_a_model_outage_escalates_and_refusal_defaults_to_english():
     assert state_update == {"outcome": "escalate", "decision_evidence": [degraded, escalation]}
     assert route_after_classify(state_update) == "refuse"
 
-    assert refuse(state_update)["messages"][0].content == REFUSAL_TEXT["en"]
+    assert refuse_node(state_update)["messages"][0].content == REFUSAL_TEXT["en"]
 
 
 def _classify_graph(llm):
     """classify -> refuse or a stand-in agent node, wired the way the real graph will be."""
     graph = StateGraph(AgentState)
     graph.add_node("classify", classify_node(llm, "small"))
-    graph.add_node("refuse", refuse)
+    graph.add_node("refuse", refuse_node)
     graph.add_node("agent", lambda state: {"messages": [AIMessage("agent ran")]})
     graph.add_edge(START, "classify")
     graph.add_conditional_edges("classify", route_after_classify, ["agent", "refuse"])
@@ -326,12 +327,13 @@ def make_tools(tool_calls):
     return [search_policies, get_leave_balance, create_ticket]
 
 
-def run_graph(llm, text="hi"):
+def run_graph(llm, text="hi", **graph_options):
     """Run the wired graph in a bound request. Returns the final state, the tools' log
-    and the request's evidence.
+    and the request's evidence. `graph_options` go to build_graph, for example
+    `max_tool_calls=2`.
     """
     tool_calls = []
-    graph = build_graph(llm, "small", "main", make_tools(tool_calls))
+    graph = build_graph(llm, "small", "main", make_tools(tool_calls), **graph_options)
     with bind_request_context("emp_001", "req-1", "rest") as ctx:
         result = graph.invoke(new_state(text))
     return result, tool_calls, ctx.evidence
@@ -519,3 +521,171 @@ def test_out_of_scope_never_reaches_the_agent():
 
     assert len(llm.calls) == 1
     assert result["outcome"] == "escalate"
+
+
+# --- the tool limit ---
+#
+# The tool limit is the most tool calls one request may use (`max_tool_calls`, 8 by default).
+# Before the tools run, the router adds the calls the model just asked for to the calls
+# already used. If the total is over the limit, none of the new calls run and the request
+# ends with `escalate`. A group of calls is never cut to fit, because the model would
+# then answer from a partial result.
+#
+# The router tests below call `route_after_agent` directly with a small hand-made state.
+# The graph tests run the whole graph with the same stand-ins as the tests above
+# (ScriptedLLM, text_reply, call_reply, make_tools).
+
+
+def state_after_agent_reply(tool_calls_used, requested_calls):
+    """The state as `route_after_agent` sees it, right after the agent node replied.
+    `tool_calls_used` is the count so far. The last message asks for `requested_calls`
+    new tool calls.
+    """
+    calls = []
+    for number in range(requested_calls):
+        calls.append(
+            {"type": "tool_call", "id": f"call_{number}", "name": "get_leave_balance", "args": {}}
+        )
+    return {
+        "messages": [AIMessage("", tool_calls=calls)],
+        "tool_calls_used": tool_calls_used,
+    }
+
+
+def several_calls_reply(*calls):
+    """A model reply that asks for several tool calls at once. Each call is a
+    (call_id, tool name) pair, and every call has no arguments.
+    """
+    items = []
+    for call_id, name in calls:
+        items.append(
+            SimpleNamespace(type="function_call", call_id=call_id, name=name, arguments="{}")
+        )
+    return SimpleNamespace(output_text="", output=items)
+
+
+def test_calls_that_fit_in_the_limit_go_to_the_tools():
+    state = state_after_agent_reply(tool_calls_used=3, requested_calls=2)
+
+    assert route_after_agent(state, max_tool_calls=8) == "tools"
+
+
+def test_using_exactly_the_limit_is_allowed():
+    state = state_after_agent_reply(tool_calls_used=7, requested_calls=1)
+
+    assert route_after_agent(state, max_tool_calls=8) == "tools"
+
+
+def test_one_call_over_the_limit_goes_to_tool_limit_reached():
+    state = state_after_agent_reply(tool_calls_used=8, requested_calls=1)
+
+    assert route_after_agent(state, max_tool_calls=8) == "tool_limit_reached"
+
+
+def test_a_group_of_calls_that_does_not_fit_is_rejected_as_a_whole():
+    state = state_after_agent_reply(tool_calls_used=6, requested_calls=3)
+
+    assert route_after_agent(state, max_tool_calls=8) == "tool_limit_reached"
+
+
+def test_a_reply_without_tool_calls_is_never_over_the_limit():
+    state = state_after_agent_reply(tool_calls_used=8, requested_calls=0)
+
+    assert route_after_agent(state, max_tool_calls=8) == "verify"
+
+
+def test_the_tool_limit_node_escalates_and_records_the_numbers():
+    state = state_after_agent_reply(tool_calls_used=8, requested_calls=1)
+
+    with bind_request_context("emp_001", "req-1", "rest"):
+        state_update = tool_limit_node(state, max_tool_calls=8)
+
+    assert state_update["outcome"] == "escalate"
+    assert state_update["decision_evidence"] == [
+        {"type": "tool_limit", "tool_calls_used": 8, "tool_calls_requested": 1, "limit": 8},
+        {"type": "escalation", "reason": "tool_limit_reached"},
+    ]
+
+
+def test_a_model_that_keeps_asking_for_tools_is_stopped_and_escalated():
+    # The limit is 2. The model asks for a tool 3 times in a row.
+    llm = ScriptedLLM(
+        CLASSIFIED,
+        call_reply("call_1", "get_leave_balance", "{}"),
+        call_reply("call_2", "get_leave_balance", "{}"),
+        call_reply("call_3", "get_leave_balance", "{}"),
+        # There is no fifth reply. If the graph called the model again after
+        # the stop, ScriptedLLM would fail with an IndexError.
+    )
+
+    result, tool_calls, _ = run_graph(llm, max_tool_calls=2)
+
+    assert len(tool_calls) == 2
+    assert result["tool_calls_used"] == 2
+    # the model was called 4 times: classify, then the agent 3 times
+    assert len(llm.calls) == 4
+    assert result["outcome"] == "escalate"
+    assert result["messages"][-1].content == REFUSAL_TEXT["en"]
+
+
+def test_the_limit_stop_is_visible_in_the_decision_evidence():
+    llm = ScriptedLLM(
+        CLASSIFIED,
+        call_reply("call_1", "get_leave_balance", "{}"),
+        call_reply("call_2", "get_leave_balance", "{}"),
+        call_reply("call_3", "get_leave_balance", "{}"),
+    )
+
+    result, _, _ = run_graph(llm, max_tool_calls=2)
+
+    # in order: the classification, the two tool results, then the stop
+    assert [item["type"] for item in result["decision_evidence"]] == [
+        "classification",
+        "tool_result",
+        "tool_result",
+        "tool_limit",
+        "escalation",
+    ]
+    assert result["decision_evidence"][-2] == {
+        "type": "tool_limit",
+        "tool_calls_used": 2,
+        "tool_calls_requested": 1,
+        "limit": 2,
+    }
+    assert result["decision_evidence"][-1]["reason"] == "tool_limit_reached"
+
+
+def test_a_group_of_calls_over_the_limit_runs_none_of_them():
+    # The limit is 2. In one reply the model asks for 3 tools.
+    llm = ScriptedLLM(
+        CLASSIFIED,
+        several_calls_reply(
+            ("call_1", "get_leave_balance"),
+            ("call_2", "get_leave_balance"),
+            ("call_3", "get_leave_balance"),
+        ),
+    )
+
+    result, tool_calls, _ = run_graph(llm, max_tool_calls=2)
+
+    # not even the first two ran: the group is not cut to fit
+    assert tool_calls == []
+    assert result["tool_calls_used"] == 0
+    assert result["outcome"] == "escalate"
+
+
+def test_a_request_that_uses_exactly_the_limit_still_finishes():
+    # The limit is 2. The model uses 2 tools and then answers.
+    llm = ScriptedLLM(
+        CLASSIFIED,
+        call_reply("call_1", "get_leave_balance", "{}"),
+        call_reply("call_2", "get_leave_balance", "{}"),
+        text_reply("You have 18 days left."),
+    )
+
+    result, tool_calls, _ = run_graph(llm, max_tool_calls=2)
+
+    assert len(tool_calls) == 2
+    assert result["messages"][-1].content == "You have 18 days left."
+    # no outcome is set yet. The verify node, which sets it, comes in a later commit
+    assert result["outcome"] is None
