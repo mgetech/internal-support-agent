@@ -109,14 +109,25 @@ def test_the_objection_names_the_bad_id_and_tells_the_model_what_to_do():
 
 
 # --- the verify node, called directly ---
+#
+# A failed draft gets one retry. The first failure saves the objection in the state's
+# `verifier_objection` and leaves `outcome` unset, so the router sends the request back
+# to the agent. A failure while `verifier_objection` is already set means the retry was
+# used, so the request escalates. The tests below set `verifier_objection` to say which
+# of the two drafts they are checking.
+
+EARLIER_OBJECTION = "the objection from the first failed draft"
 
 
-def draft_state(draft, retrieved_chunk_ids=(), proposed_action_ids=()):
-    """The state the verify node sees: the draft answer is the last message."""
+def draft_state(draft, retrieved_chunk_ids=(), proposed_action_ids=(), verifier_objection=None):
+    """The state the verify node sees: the draft answer is the last message.
+    `verifier_objection` is None for a first draft, and set for the retried draft.
+    """
     return {
         "messages": [AIMessage(draft)],
         "retrieved_chunk_ids": list(retrieved_chunk_ids),
         "proposed_action_ids": list(proposed_action_ids),
+        "verifier_objection": verifier_objection,
     }
 
 
@@ -138,11 +149,27 @@ def test_a_passing_draft_with_proposals_ends_in_propose_action():
     assert run_verify(state)["outcome"] == "propose_action"
 
 
-def test_a_failing_draft_escalates_even_when_there_are_proposals():
+def test_a_failing_retried_draft_escalates_even_when_there_are_proposals():
     # propose_action needs the verification to pass
-    state = draft_state(f"[chunk:{CHUNK}]", retrieved_chunk_ids=[], proposed_action_ids=[5])
+    state = draft_state(
+        f"[chunk:{CHUNK}]",
+        retrieved_chunk_ids=[],
+        proposed_action_ids=[5],
+        verifier_objection=EARLIER_OBJECTION,
+    )
 
     assert run_verify(state)["outcome"] == "escalate"
+
+
+def test_a_failing_first_draft_saves_the_objection_and_sets_no_outcome():
+    state = draft_state(f"[chunk:{CHUNK}]", retrieved_chunk_ids=[])
+
+    state_update = run_verify(state)
+
+    assert "outcome" not in state_update
+    # the saved objection is the one the verifier wrote for this draft
+    assert state_update["verifier_objection"] == verify_citations(f"[chunk:{CHUNK}]", []).objection
+    assert f"[chunk:{CHUNK}]" in state_update["verifier_objection"]
 
 
 def test_the_verdict_is_an_evidence_item():
@@ -160,20 +187,42 @@ def test_the_verdict_is_an_evidence_item():
     }
 
 
-def test_a_failing_verdict_is_followed_by_an_escalation_item():
+def test_a_failing_first_draft_is_followed_by_a_retry_item():
     state = draft_state(f"[chunk:{CHUNK}]", retrieved_chunk_ids=[])
+
+    verdict, retry = run_verify(state)["decision_evidence"]
+
+    assert verdict["passed"] is False
+    assert verdict["unknown_citations"] == [CHUNK]
+    assert retry == {"type": "retry", "reason": "citation_check_failed"}
+
+
+def test_a_failing_retried_draft_is_followed_by_an_escalation_item():
+    state = draft_state(
+        f"[chunk:{CHUNK}]", retrieved_chunk_ids=[], verifier_objection=EARLIER_OBJECTION
+    )
 
     verdict, escalation = run_verify(state)["decision_evidence"]
 
     assert verdict["passed"] is False
-    assert verdict["unknown_citations"] == [CHUNK]
     assert escalation == {"type": "escalation", "reason": "citation_check_failed"}
 
 
-def test_a_passed_request_ends_and_an_escalated_one_goes_to_refuse():
+def test_a_retried_draft_that_passes_resolves():
+    # the objection stays in the state after the retry. A pass still ends the request.
+    state = draft_state("You have 18 days left.", verifier_objection=EARLIER_OBJECTION)
+
+    assert run_verify(state)["outcome"] == "resolve"
+
+
+def test_where_the_request_goes_after_the_verify_node():
+    # passed: the request ends
     assert route_after_verify({"outcome": "resolve"}) == "end"
     assert route_after_verify({"outcome": "propose_action"}) == "end"
+    # failed twice: refuse
     assert route_after_verify({"outcome": "escalate"}) == "refuse"
+    # failed once: no outcome yet, so back to the agent for the retry
+    assert route_after_verify({"outcome": None}) == "agent"
 
 
 # --- the whole graph ---
@@ -194,9 +243,10 @@ def test_an_answer_that_cites_a_chunk_from_this_requests_search_is_accepted():
     assert result["decision_evidence"][-1]["passed"] is True
 
 
-def test_an_answer_that_cites_an_id_nobody_searched_for_is_escalated():
-    # the model never calls search_policies, but it cites a chunk
-    llm = ScriptedLLM(CLASSIFIED, text_reply(f"You get 30 days [chunk:{CHUNK}]."))
+def test_an_answer_that_cites_an_id_nobody_searched_for_is_escalated_after_one_retry():
+    # the model never calls search_policies, but it cites a chunk. It does it twice.
+    bad_draft = text_reply(f"You get 30 days [chunk:{CHUNK}].")
+    llm = ScriptedLLM(CLASSIFIED, bad_draft, bad_draft)
 
     result, _, _ = run_graph(llm)
 
@@ -205,18 +255,22 @@ def test_an_answer_that_cites_an_id_nobody_searched_for_is_escalated():
     assert result["messages"][-1].content == REFUSAL_TEXT["en"]
     assert [item["type"] for item in result["decision_evidence"]] == [
         "classification",
-        "verifier_verdict",
+        "verifier_verdict",  # the first draft fails
+        "retry",
+        "verifier_verdict",  # the retried draft fails
         "escalation",
     ]
     assert result["decision_evidence"][1]["unknown_citations"] == [CHUNK]
 
 
 def test_an_id_that_the_search_did_not_return_is_not_accepted():
-    # the search returns CHUNK, but the answer cites a different (real-looking) id
+    # the search returns CHUNK, but both drafts cite a different (real-looking) id
+    bad_draft = text_reply(f"You can use the laptop [chunk:{OTHER_CHUNK}].")
     llm = ScriptedLLM(
         CLASSIFIED,
         call_reply("call_1", "search_policies", '{"query": "vacation"}'),
-        text_reply(f"You can use the laptop [chunk:{OTHER_CHUNK}]."),
+        bad_draft,
+        bad_draft,
     )
 
     result, _, _ = run_graph(llm)
@@ -238,11 +292,13 @@ def test_a_request_with_a_proposal_and_a_passing_answer_ends_in_propose_action()
     assert result["outcome"] == "propose_action"
 
 
-def test_a_proposal_does_not_save_an_answer_that_fails_the_check():
+def test_a_proposal_does_not_save_an_answer_that_fails_the_check_twice():
+    bad_draft = text_reply(f"Sent for approval, see [chunk:{CHUNK}].")
     llm = ScriptedLLM(
         CLASSIFIED,
         call_reply("call_1", "create_ticket", '{"title": "laptop"}'),
-        text_reply(f"Sent for approval, see [chunk:{CHUNK}]."),
+        bad_draft,
+        bad_draft,
     )
 
     result, _, _ = run_graph(llm)
@@ -250,3 +306,109 @@ def test_a_proposal_does_not_save_an_answer_that_fails_the_check():
     # the proposal is still in the database, waiting for a person. The answer is not sent.
     assert result["proposed_action_ids"] == [5]
     assert result["outcome"] == "escalate"
+
+
+# --- the retry, in the whole graph ---
+#
+# In these tests the first draft cites an id that no search returned, so it fails. The
+# agent then gets one more try, with the objection added to its input as a system message.
+
+BAD_DRAFT = text_reply(f"You get 30 days [chunk:{CHUNK}].")
+
+
+def test_a_failed_first_draft_is_retried_and_a_good_second_draft_is_accepted():
+    llm = ScriptedLLM(CLASSIFIED, BAD_DRAFT, text_reply("You have 18 days left."))
+
+    result, _, _ = run_graph(llm)
+
+    assert result["outcome"] == "resolve"
+    # the employee gets the second draft
+    assert result["messages"][-1].content == "You have 18 days left."
+    assert [item["type"] for item in result["decision_evidence"]] == [
+        "classification",
+        "verifier_verdict",  # the first draft fails
+        "retry",
+        "verifier_verdict",  # the second draft passes
+    ]
+    assert [item["passed"] for item in result["decision_evidence"] if "passed" in item] == [
+        False,
+        True,
+    ]
+
+
+def test_the_first_model_call_of_the_agent_has_no_objection():
+    llm = ScriptedLLM(CLASSIFIED, BAD_DRAFT, text_reply("You have 18 days left."))
+
+    run_graph(llm)
+
+    first_agent_input = llm.calls[1]["input"]
+    assert all(item.get("role") != "system" for item in first_agent_input)
+
+
+def test_the_retry_sends_the_objection_as_the_last_system_message():
+    llm = ScriptedLLM(CLASSIFIED, BAD_DRAFT, text_reply("You have 18 days left."))
+
+    result, _, _ = run_graph(llm)
+
+    objection = verify_citations(f"You get 30 days [chunk:{CHUNK}].", []).objection
+    retry_input = llm.calls[2]["input"]
+    # the conversation so far, including the failed draft, then the objection
+    assert retry_input == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": f"You get 30 days [chunk:{CHUNK}]."},
+        {"role": "system", "content": objection},
+    ]
+    assert result["verifier_objection"] == objection
+
+
+def test_the_retried_agent_can_search_and_then_cite_what_it_found():
+    llm = ScriptedLLM(
+        CLASSIFIED,
+        BAD_DRAFT,
+        call_reply("call_1", "search_policies", '{"query": "vacation"}'),
+        text_reply(f"You get 30 days [chunk:{CHUNK}]."),
+    )
+
+    result, _, _ = run_graph(llm)
+
+    assert result["retrieved_chunk_ids"] == [CHUNK]
+    assert result["outcome"] == "resolve"
+    # the objection is added to every model call after the failure, including this one
+    last_input = llm.calls[3]["input"]
+    assert last_input[-1]["role"] == "system"
+
+
+def test_a_draft_is_retried_exactly_once():
+    # The script has no reply after the two drafts. A third agent call would fail with an
+    # IndexError, and a classify call would be a fourth call too.
+    llm = ScriptedLLM(CLASSIFIED, BAD_DRAFT, BAD_DRAFT)
+
+    result, _, _ = run_graph(llm)
+
+    assert len(llm.calls) == 3  # classify, first draft, retried draft
+    assert result["outcome"] == "escalate"
+    assert result["messages"][-1].content == REFUSAL_TEXT["en"]
+
+
+def test_a_request_that_passes_the_first_time_is_never_retried():
+    llm = ScriptedLLM(CLASSIFIED, text_reply("You have 18 days left."))
+
+    result, _, _ = run_graph(llm)
+
+    assert len(llm.calls) == 2  # classify, agent
+    assert result["verifier_objection"] is None
+    assert "retry" not in [item["type"] for item in result["decision_evidence"]]
+
+
+def test_a_proposal_made_before_a_retry_is_kept():
+    llm = ScriptedLLM(
+        CLASSIFIED,
+        call_reply("call_1", "create_ticket", '{"title": "laptop"}'),
+        BAD_DRAFT,
+        text_reply("I sent your ticket for approval."),
+    )
+
+    result, _, _ = run_graph(llm)
+
+    assert result["proposed_action_ids"] == [5]
+    assert result["outcome"] == "propose_action"

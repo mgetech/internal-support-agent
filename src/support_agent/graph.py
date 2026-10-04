@@ -55,7 +55,9 @@ def build_graph(
             "refuse": "refuse",
         },
     )
-    graph.add_conditional_edges("verify", route_after_verify, {"end": END, "refuse": "refuse"})
+    graph.add_conditional_edges(
+        "verify", route_after_verify, {"agent": "agent", "end": END, "refuse": "refuse"}
+    )
     graph.add_edge("tools", "agent")
     graph.add_edge("tool_limit_reached", "refuse")
     graph.add_edge("refuse", END)

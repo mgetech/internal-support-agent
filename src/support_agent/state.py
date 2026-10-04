@@ -27,7 +27,8 @@ class AgentState(TypedDict):
     proposed_action_ids: Annotated[list[int], operator.add]
     tool_calls_used: int
     outcome: Outcome | None
-    # set by the verifier when a draft fails; the agent node injects it, then it is cleared
+    # set when the first draft fails the verifier. The agent node adds it to every model
+    # call after that, as a system message. A failure while it is set escalates.
     verifier_objection: str | None
     # ordered evidence items for the Decision Record
     decision_evidence: Annotated[list[dict[str, Any]], operator.add]

@@ -181,10 +181,14 @@ def agent_node(
     def agent(state: AgentState) -> dict[str, Any]:
         ctx = get_request_context()
         start = len(ctx.evidence)
+        model_input = _to_response_input(state["messages"])
+        if state["verifier_objection"]:
+            # the retry: tell the model what was wrong with its last draft
+            model_input.append({"role": "system", "content": state["verifier_objection"]})
         try:
             response = llm.create(
                 model,
-                _to_response_input(state["messages"]),
+                model_input,
                 prompt,
                 instructions=prompt.text,
                 tools=tool_schemas,
@@ -282,7 +286,11 @@ def verify_node(state: AgentState) -> dict[str, Any]:
     """Run the deterministic checks on the draft answer, which is the last message.
 
     If the draft passes, the request ends: `propose_action` when this request proposed
-    actions, `resolve` otherwise. If it fails, the request ends in `escalate`.
+    actions, `resolve` otherwise.
+
+    If it fails, the agent gets one more try. The objection is saved in
+    `verifier_objection` and `outcome` stays unset. If a draft fails while an objection
+    is already saved, the retry has been used, and the request ends in `escalate`.
     """
     ctx = get_request_context()
     start = len(ctx.evidence)
@@ -290,13 +298,26 @@ def verify_node(state: AgentState) -> dict[str, Any]:
     verdict = verify_citations(draft, state["retrieved_chunk_ids"])
     ctx.evidence.append({"type": "verifier_verdict", **verdict.model_dump()})
 
-    if not verdict.passed:
-        ctx.evidence.append({"type": "escalation", "reason": "citation_check_failed"})
-        return {"outcome": "escalate", "decision_evidence": _evidence_since(start)}
+    if verdict.passed:
+        outcome = "propose_action" if state["proposed_action_ids"] else "resolve"
+        return {"outcome": outcome, "decision_evidence": _evidence_since(start)}
 
-    outcome = "propose_action" if state["proposed_action_ids"] else "resolve"
-    return {"outcome": outcome, "decision_evidence": _evidence_since(start)}
+    if state["verifier_objection"] is None:
+        ctx.evidence.append({"type": "retry", "reason": "citation_check_failed"})
+        return {
+            "verifier_objection": verdict.objection,
+            "decision_evidence": _evidence_since(start),
+        }
+
+    ctx.evidence.append({"type": "escalation", "reason": "citation_check_failed"})
+    return {"outcome": "escalate", "decision_evidence": _evidence_since(start)}
 
 
-def route_after_verify(state: AgentState) -> Literal["refuse", "end"]:
-    return "refuse" if state["outcome"] == "escalate" else "end"
+def route_after_verify(state: AgentState) -> Literal["agent", "refuse", "end"]:
+    outcome = state.get("outcome")
+    if outcome == "escalate":
+        return "refuse"
+    if outcome is None:
+        # no outcome after a verify means the first draft failed: retry
+        return "agent"
+    return "end"
