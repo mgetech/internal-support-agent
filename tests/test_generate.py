@@ -111,6 +111,22 @@ def test_every_policy_carries_the_policy_version_in_frontmatter():
         assert policy.policy_version == "2026-09.1"
 
 
+def test_every_policy_chunk_row_carries_the_version_of_its_policy_file():
+    versions = {policy.policy_version for policy in read_policies().values()}
+
+    rows = generate_policy_chunks()
+
+    assert versions == {"2026-09.1"}
+    assert {row["policy_version"] for row in rows} == versions
+
+
+def test_the_seed_sql_writes_the_policy_version_of_every_chunk():
+    sql = render_seed_sql()
+
+    # one quoted version in each of the 16 chunk rows
+    assert sql.count("'2026-09.1'") == len(generate_policy_chunks())
+
+
 def test_vacation_policy_has_the_entitlement_heading():
     # ground truth citations (e.g. vacation-policy#entitlement#0) depend on
     # this exact heading text once the structural chunker slugifies it

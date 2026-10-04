@@ -205,6 +205,7 @@ def generate_policy_chunks() -> list[dict]:
                     "content": chunk.content,
                     "domain": policy.domain,
                     "chunker": chunk.meta["chunker"],
+                    "policy_version": policy.policy_version,
                 }
             )
     return rows
@@ -261,7 +262,15 @@ def embed_policy_chunks(
 _EMPLOYEE_COLUMNS = ["id", "name", "role", "employment_type", "weekly_hours", "country", "hired_at"]
 _LEAVE_BALANCE_COLUMNS = ["employee_id", "year", "entitlement_days", "taken_days", "pending_days"]
 _OUTAGE_COLUMNS = ["system", "status", "started_at", "note"]
-_POLICY_CHUNK_COLUMNS = ["id", "policy", "heading", "content", "domain", "chunker"]
+_POLICY_CHUNK_COLUMNS = [
+    "id",
+    "policy",
+    "heading",
+    "content",
+    "domain",
+    "chunker",
+    "policy_version",
+]
 
 
 def _sql_literal(value: object) -> str:

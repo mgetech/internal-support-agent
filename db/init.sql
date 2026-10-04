@@ -62,6 +62,7 @@ CREATE TABLE policy_chunks (
     lang TEXT NOT NULL DEFAULT 'en',
     effective_date DATE,
     chunker TEXT NOT NULL DEFAULT 'structural',
+    policy_version TEXT NOT NULL,
     embedding vector(1536),
     ts tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED
 );
