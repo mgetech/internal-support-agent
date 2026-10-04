@@ -19,6 +19,7 @@ from openai.types.responses import Response
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from support_agent.config import DEFAULT_MAX_TOOL_CALLS_PER_REQUEST
+from support_agent.decision_record import DecisionRecord, create_decision_record
 from support_agent.guardrails.verifier import verify_citations
 from support_agent.llm import LLMClient, LLMUnavailableError
 from support_agent.prompts import get_prompt
@@ -311,6 +312,19 @@ def verify_node(state: AgentState) -> dict[str, Any]:
 
     ctx.evidence.append({"type": "escalation", "reason": "citation_check_failed"})
     return {"outcome": "escalate", "decision_evidence": _evidence_since(start)}
+
+
+def finalize_node(
+    state: AgentState,
+    save_record: Callable[[DecisionRecord], None],
+    get_policy_version: Callable[[], str | None],
+) -> dict[str, Any]:
+    """The last node, on every path. It reads the version of the policy corpus, builds
+    the Decision Record from the final state and saves it with `save_record`. It changes
+    nothing in the state.
+    """
+    save_record(create_decision_record(state, get_policy_version()))
+    return {}
 
 
 def route_after_verify(state: AgentState) -> Literal["agent", "refuse", "end"]:

@@ -42,7 +42,13 @@ def test_the_agent_sends_the_system_prompt_and_the_tool_belt():
 
 def test_the_real_tool_belt_has_no_identity_parameter_in_its_schemas():
     llm = ScriptedLLM(CLASSIFIED, text_reply("done"))
-    graph = build_graph(llm, "small", "main")
+    graph = build_graph(
+        llm,
+        "small",
+        "main",
+        save_record=lambda record: None,
+        get_policy_version=lambda: None,
+    )
 
     with bind_request_context("emp_001", "req-1", "rest"):
         graph.invoke(new_state("hi"))

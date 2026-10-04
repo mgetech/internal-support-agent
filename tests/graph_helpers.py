@@ -104,13 +104,24 @@ def make_tools(tool_calls):
     return [search_policies, get_leave_balance, create_ticket]
 
 
-def run_graph(llm, text="hi", **graph_options):
+def run_graph(llm, text="hi", saved_records=None, **graph_options):
     """Run the wired graph in a bound request. Returns the final state, the tools' log
-    and the request's evidence. `graph_options` go to build_graph, for example
-    `max_tool_calls=2`.
+    and the request's evidence.
+
+    The Decision Record is not written to the database. It is added to `saved_records`,
+    a list you can pass in to read it afterwards. The policy version is None, because
+    reading it needs the database. `graph_options` go to build_graph and replace these
+    defaults, for example `max_tool_calls=2` or `get_policy_version=lambda: "2026-09.1"`.
     """
     tool_calls = []
-    graph = build_graph(llm, "small", "main", make_tools(tool_calls), **graph_options)
+    if saved_records is None:
+        saved_records = []
+    options = {
+        "save_record": saved_records.append,
+        "get_policy_version": lambda: None,
+        **graph_options,
+    }
+    graph = build_graph(llm, "small", "main", make_tools(tool_calls), **options)
     with bind_request_context("emp_001", "req-1", "rest") as ctx:
         result = graph.invoke(new_state(text))
     return result, tool_calls, ctx.evidence

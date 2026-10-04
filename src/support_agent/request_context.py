@@ -4,6 +4,7 @@ employee here; tools read it from here. No tool takes an employee id as an argum
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -21,6 +22,8 @@ class RequestContext:
     # evidence items for this request's Decision Record, in the order they happened.
     # Tools add to this list; the graph reads it.
     evidence: list[dict[str, Any]] = field(default_factory=list, compare=False, repr=False)
+    # when the request started, for the latency in the Decision Record (time.perf_counter)
+    started_at: float = field(default_factory=time.perf_counter, compare=False, repr=False)
 
 
 class NoRequestContextError(RuntimeError):
