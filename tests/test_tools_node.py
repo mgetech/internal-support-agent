@@ -34,10 +34,12 @@ def test_tool_results_become_evidence_and_the_calls_are_counted():
     result, _, evidence = run_graph(llm)
 
     assert result["tool_calls_used"] == 2
+    # the verifier's verdict on the final answer comes last
     assert [item["type"] for item in result["decision_evidence"]] == [
         "classification",
         "tool_result",
         "tool_result",
+        "verifier_verdict",
     ]
     assert result["decision_evidence"] == evidence
 
@@ -262,5 +264,5 @@ def test_a_request_that_uses_exactly_the_limit_still_finishes():
 
     assert len(tool_calls) == 2
     assert result["messages"][-1].content == "You have 18 days left."
-    # no outcome is set yet. The verify node, which sets it, comes in a later commit
-    assert result["outcome"] is None
+    # the answer has no citations, so it passes the verifier, and nothing was proposed
+    assert result["outcome"] == "resolve"

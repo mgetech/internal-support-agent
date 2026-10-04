@@ -19,6 +19,7 @@ from openai.types.responses import Response
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from support_agent.config import DEFAULT_MAX_TOOL_CALLS_PER_REQUEST
+from support_agent.guardrails.verifier import verify_citations
 from support_agent.llm import LLMClient, LLMUnavailableError
 from support_agent.prompts import get_prompt
 from support_agent.request_context import get_request_context
@@ -275,3 +276,27 @@ def tools_node(tools: Sequence[Tool]) -> Callable[[AgentState], dict[str, Any]]:
         }
 
     return run_tools
+
+
+def verify_node(state: AgentState) -> dict[str, Any]:
+    """Run the deterministic checks on the draft answer, which is the last message.
+
+    If the draft passes, the request ends: `propose_action` when this request proposed
+    actions, `resolve` otherwise. If it fails, the request ends in `escalate`.
+    """
+    ctx = get_request_context()
+    start = len(ctx.evidence)
+    draft = state["messages"][-1].text
+    verdict = verify_citations(draft, state["retrieved_chunk_ids"])
+    ctx.evidence.append({"type": "verifier_verdict", **verdict.model_dump()})
+
+    if not verdict.passed:
+        ctx.evidence.append({"type": "escalation", "reason": "citation_check_failed"})
+        return {"outcome": "escalate", "decision_evidence": _evidence_since(start)}
+
+    outcome = "propose_action" if state["proposed_action_ids"] else "resolve"
+    return {"outcome": outcome, "decision_evidence": _evidence_since(start)}
+
+
+def route_after_verify(state: AgentState) -> Literal["refuse", "end"]:
+    return "refuse" if state["outcome"] == "escalate" else "end"

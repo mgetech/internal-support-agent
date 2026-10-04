@@ -16,8 +16,10 @@ from support_agent.nodes import (
     refuse_node,
     route_after_agent,
     route_after_classify,
+    route_after_verify,
     tool_limit_node,
     tools_node,
+    verify_node,
 )
 from support_agent.state import AgentState
 from support_agent.tools import TOOLS, Tool
@@ -30,8 +32,8 @@ def build_graph(
     tools: Sequence[Tool] = TOOLS,
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_REQUEST,
 ) -> CompiledStateGraph:
-    """classify -> agent <-> tools. Out-of-scope requests, failures and an exhausted
-    tool limit (`max_tool_calls`) end in refuse.
+    """classify -> agent <-> tools -> verify. Out-of-scope requests, failures, a reached
+    tool limit (`max_tool_calls`) and a failed check end in refuse.
     """
     graph = StateGraph(AgentState)
     graph.add_node("classify", classify_node(llm, classifier_model))
@@ -39,20 +41,21 @@ def build_graph(
     graph.add_node("agent", agent_node(llm, agent_model, tools))
     graph.add_node("tools", tools_node(tools))
     graph.add_node("tool_limit_reached", partial(tool_limit_node, max_tool_calls=max_tool_calls))
+    graph.add_node("verify", verify_node)
 
     graph.add_edge(START, "classify")
     graph.add_conditional_edges("classify", route_after_classify, ["agent", "refuse"])
-    # a reply without tool calls ends the graph until the verify node exists
     graph.add_conditional_edges(
         "agent",
         partial(route_after_agent, max_tool_calls=max_tool_calls),
         {
             "tools": "tools",
-            "verify": END,
+            "verify": "verify",
             "tool_limit_reached": "tool_limit_reached",
             "refuse": "refuse",
         },
     )
+    graph.add_conditional_edges("verify", route_after_verify, {"end": END, "refuse": "refuse"})
     graph.add_edge("tools", "agent")
     graph.add_edge("tool_limit_reached", "refuse")
     graph.add_edge("refuse", END)
