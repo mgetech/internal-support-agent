@@ -18,14 +18,29 @@ All data is synthetic.
 flowchart LR
     A["Request"] --> B["1. classify"]
     B --> C["2. agent"]
-    C -->|tool calls| T["3. tools"]
-    T -->|results| C
-    T -.-> K[("Policy retrieval - RAG")]
-    T -.-> H[("Records and outages")]
-    C -->|draft answer| V["4. verify citations"]
-    V -->|"bad citation: retry once"| C
-    V -->|passes| F["5. finalize"]
+    C -- tool calls --> T["3. tools"]
+    T -- results --> C
+    T -.-> K[("Policy retrieval - RAG")] & H[("Records and outages")]
+    C -- draft answer --> V["4. verify citations"]
+    V -- bad citation: retry once --> C
+    V -- passes --> F["5. finalize"]
     F --> D[("Decision Record + audit event")]
+
+     A:::Ash
+     B:::Sky
+     C:::Sky
+     T:::Peach
+     K:::Aqua
+     H:::Aqua
+     V:::Peach
+     F:::Pine
+     D:::Aqua
+    classDef Aqua stroke-width:1px, stroke-dasharray:none, stroke:#46EDC8, fill:#DEFFF8, color:#378E7A
+    classDef Sky stroke-width:1px, stroke-dasharray:none, stroke:#374D7C, fill:#E2EBFF, color:#374D7C
+    classDef Rose stroke-width:1px, stroke-dasharray:none, stroke:#FF5978, fill:#FFDFE5, color:#8E2236
+    classDef Pine stroke-width:1px, stroke-dasharray:none, stroke:#254336, fill:#27654A, color:#FFFFFF
+    classDef Peach stroke-width:1px, stroke-dasharray:none, stroke:#FBB35A, fill:#FFEFDB, color:#8F632D
+    classDef Ash stroke-width:1px, stroke-dasharray:none, stroke:#999999, fill:#EEEEEE, color:#000000
 ```
 
 The dotted lines show where the data comes from. An answer may cite only the chunks that

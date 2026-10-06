@@ -6,26 +6,19 @@ is planned is in the roadmap in the README.
 ## How a request flows
 
 ```mermaid
-flowchart TB
-    A["Request from a logged-in employee"] --> B["1. classify"]
-    B -- out of scope, or the model fails --> R["refuse: escalate"]
+flowchart LR
+    A["Request"] --> B["1. classify"]
     B --> C["2. agent"]
     C -- tool calls --> T["3. tools"]
-    T -- results go back --> C
-    T -. search_policies .-> K[("Policy retrieval - RAG")]
-    T -. own records, outages .-> H[("Employee records<br>and IT outages")]
-    T ~~~ V["4. verify citations"]
-    C -- no more tool calls: draft answer --> V
-    C -- tool limit reached --> R
-    V -- bad citation, first time --> C
-    V -- bad citation, second time --> R
+    T -- results --> C
+    T -.-> K[("Policy retrieval - RAG")] & H[("Records and outages")]
+    C -- draft answer --> V["4. verify citations"]
+    V -- bad citation: retry once --> C
     V -- passes --> F["5. finalize"]
-    R --> F
     F --> D[("Decision Record + audit event")]
 
      A:::Ash
      B:::Sky
-     R:::Rose
      C:::Sky
      T:::Peach
      K:::Aqua
@@ -43,6 +36,18 @@ flowchart TB
 
 The dotted lines show where the data comes from. The retrieval (RAG) is the
 `search_policies` tool. The chunk ids it returns are the only ids an answer may cite.
+Every path ends in `finalize`, which saves the Decision Record.
+
+A request ends in `escalate` at these points:
+
+| Step | Reason |
+|---|---|
+| classify | the request is outside HR and IT, or the classification failed |
+| agent | no model answered, or the model sent tool arguments that were not valid JSON |
+| agent | the next tool calls would go over the tool limit |
+| verify | the answer cited a chunk this request did not retrieve, a second time |
+
+The `refuse` node then writes the answer in the language of the request.
 
 Every request ends in exactly one outcome:
 
