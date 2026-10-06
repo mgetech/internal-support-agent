@@ -62,7 +62,9 @@ so nobody can ask it a question. What exists today:
 - **Proposals, not writes.** Write tools add to an approval queue and change nothing.
 - **Hybrid retrieval.** Vector search and full-text search, joined by reciprocal rank
   fusion.
-- **Agent graph.** classify → agent ⇄ tools → verify → finalize, on LangGraph.
+- **Agent graph.** classify → agent ⇄ tools → verify → finalize, on LangGraph. A small
+  model classifies first, so a request that is out of scope ends before the agent and its
+  tools run.
 - **Citation check.** Every cited chunk must come from this request's search.
 - **Decision Records.** One saved record per request: outcome, reason, evidence, versions
   and cost.

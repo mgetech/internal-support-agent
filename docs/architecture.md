@@ -117,6 +117,20 @@ tool calls used, the outcome and the evidence.
 | `refuse` | writes the answer for every escalation, in the language of the request |
 | `finalize` | builds and saves the Decision Record. It runs on every path |
 
+**Why classify is a separate step.**
+- A request that is out of scope escalates before the agent runs. No tool is offered
+  and none is called.
+- The answer must fit a strict schema. An answer that does not fit escalates, so the
+  graph never guesses a value.
+- The language comes from the classification, so the refusal text is chosen without
+  another model call.
+- It uses the small model. A request that is clearly out of scope costs one small call
+  and no agent loop.
+
+The cost is one more model call on every request. A wrong `out_of_scope` escalates a
+request that the agent could have answered. The classification is also a model answer,
+so this check is not fully deterministic.
+
 **Tool limit.** A request may use at most 8 tool calls (`MAX_TOOL_CALLS_PER_REQUEST`).
 If the calls used plus the calls just requested would go over the limit, none of the new
 calls run, and the request escalates. The calls of one reply are never cut to fit.
