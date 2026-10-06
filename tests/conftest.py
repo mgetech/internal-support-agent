@@ -112,8 +112,9 @@ def seeded_db(clean_db):
         )
     for i, c in enumerate(generate_policy_chunks()):
         clean_db.execute(
-            "INSERT INTO policy_chunks (id, policy, heading, content, domain, chunker, embedding)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s::vector)",
+            "INSERT INTO policy_chunks (id, policy, heading, content, domain, chunker,"
+            " policy_version, embedding)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector)",
             (
                 c["id"],
                 c["policy"],
@@ -121,6 +122,7 @@ def seeded_db(clean_db):
                 c["content"],
                 c["domain"],
                 c["chunker"],
+                c["policy_version"],
                 str(fake_vector(i)),
             ),
         )

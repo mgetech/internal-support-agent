@@ -12,37 +12,69 @@ of four outcomes: **resolve**, **propose an action** into a human approval queue
 **Decision Record**: a persisted, structured account of why the agent did what it did.
 All data is synthetic.
 
+## How a request flows
+
+```mermaid
+flowchart LR
+    A["Request"] --> B["1. classify"]
+    B --> C["2. agent"]
+    C -- tool calls --> T["3. tools"]
+    T -- results --> C
+    T -.-> K[("Policy retrieval - RAG")] & H[("Records and outages")]
+    C -- draft answer --> V["4. verify citations"]
+    V -- bad citation: retry once --> C
+    V -- passes --> F["5. finalize"]
+    F --> D[("Decision Record + audit event")]
+
+     A:::Ash
+     B:::Sky
+     C:::Sky
+     T:::Peach
+     K:::Aqua
+     H:::Aqua
+     V:::Peach
+     F:::Pine
+     D:::Aqua
+    classDef Aqua stroke-width:1px, stroke-dasharray:none, stroke:#46EDC8, fill:#DEFFF8, color:#378E7A
+    classDef Sky stroke-width:1px, stroke-dasharray:none, stroke:#374D7C, fill:#E2EBFF, color:#374D7C
+    classDef Rose stroke-width:1px, stroke-dasharray:none, stroke:#FF5978, fill:#FFDFE5, color:#8E2236
+    classDef Pine stroke-width:1px, stroke-dasharray:none, stroke:#254336, fill:#27654A, color:#FFFFFF
+    classDef Peach stroke-width:1px, stroke-dasharray:none, stroke:#FBB35A, fill:#FFEFDB, color:#8F632D
+    classDef Ash stroke-width:1px, stroke-dasharray:none, stroke:#999999, fill:#EEEEEE, color:#000000
+```
+
+The dotted lines show where the data comes from. An answer may cite only the chunks that
+the retrieval returned for this request. A request that is out of scope, meets a model
+failure, reaches the tool limit or fails the citation check twice ends in `escalate`
+instead of an answer. Every path ends in `finalize`.
+
 ## Status
 
-**Early.** The agent does not answer requests yet. What exists today:
+**Early.** The agent graph is built, but nothing serves it yet. There is no API or UI,
+so nobody can ask it a question. What exists today:
 
-- **Data.** 12 synthetic employees with leave balances, two IT outages, and five HR/IT
-  policies. The policies are split into sections and embedded for search.
-- **Identity.** Each request carries the logged-in employee. Tools read the employee
-  from there. No tool takes an employee id as input.
-- **Tools.** The five tools the agent will use:
-  - `get_leave_balance`: the employee's own vacation days
-  - `get_known_outages`: IT outages that are still open
-  - `search_policies`: finds policy sections by meaning and by keywords
-  - `submit_leave_request` and `create_ticket`: these do not book leave or open a
-    ticket. They check the rules in code, then add the request to a queue for a
-    human to approve. Sending the same request twice returns the first one.
-- **Audit log.** Every tool call and every proposed action is saved with the request
-  id and who made it.
-- **Security tests.** They run for every tool: no tool takes an employee id, no tool
-  runs without a logged-in employee, and write tools only add to the approval queue.
-- **Prompts.** The agent prompt and the classifier prompt are files in `prompts/`. Each
-  has an **id** and a **version**. A test fails if a prompt's text changes and its version does
-  not.
-- **Model client.** Calls go to Azure OpenAI through the **Responses API**. A failed call is
-  tried again after a short wait. If it keeps failing, the client tries a fallback model,
-  when one is set. If every model fails, it raises an error. The graph that ends the
-  request with `escalate` is not built yet. Every try is saved in the audit log and in
-  the request's evidence.
-- **Cost.** Each successful model call gets its token counts and its cost in euros, from
-  a price table in the settings. Creating the client fails if a model has no price.
+- **Synthetic data.** Employees, leave balances, outages and policies, from one
+  deterministic generator.
+- **Identity from the session.** Tools read the employee from the request. The model
+  never gives an employee id, and no tool accepts one.
+- **Typed tools.** Five tools. Read tools query the employee's own records. The model
+  never writes SQL.
+- **Proposals, not writes.** Write tools add to an approval queue and change nothing.
+- **Hybrid retrieval.** Vector search and full-text search, joined by reciprocal rank
+  fusion.
+- **Agent graph.** classify → agent ⇄ tools → verify → finalize, on LangGraph.
+- **Citation check.** Every cited chunk must come from this request's search.
+- **Decision Records.** One saved record per request: outcome, reason, evidence, versions
+  and cost.
+- **Model client.** Responses API, retry, fallback model and a cost in euros per call.
+- **Audit log.** Every tool call, proposal and model call, with the request id and the
+  actor.
+- **Versioned prompts.** A prompt change without a version bump fails a test.
+- **Tests.** Unit, component and database integration tests, with no model keys needed.
+  The security tests run for every tool.
 
-The Stack table below shows which parts are built and which are planned.
+The details and the reasons are in [docs/architecture.md](docs/architecture.md). The Stack
+table below shows which parts are built and which are planned.
 
 ## Roadmap
 
@@ -74,8 +106,8 @@ Rough build order:
 | Tests | pytest, incl. DB-backed tests against the compose/CI Postgres | In place |
 | CI | GitHub Actions — ruff + pytest always; eval gate when model secrets are configured | Partial — lint and tests |
 | Packaging | Docker + docker-compose (db, api, ui) | Partial — db only |
-| Orchestration | **LangGraph** | Planned |
-| Model inference | **Azure OpenAI via AI Foundry** — a capable deployment for the agent loop, a small one for classification and claim extraction, `text-embedding-3-small` (1536-dim) | Partial — embeddings, and a model client with retry, fallback and cost; no agent uses it yet |
+| Orchestration | **LangGraph** | Partial — graph built and tested with a scripted model; nothing serves it yet |
+| Model inference | **Azure OpenAI via AI Foundry** — a capable deployment for the agent loop, a small one for classification and claim extraction, `text-embedding-3-small` (1536-dim) | Partial — embeddings, and a model client with retry, fallback and cost; the graph uses the client, but only scripted replies are tested, with no live model run |
 | API | FastAPI | Planned |
 | Retrieval | Metadata pre-filtering → hybrid pgvector cosine + Postgres full-text ranking (`ts_rank_cd`), reciprocal-rank fusion (k=60), top-5 | Partial — hybrid search in place; metadata pre-filtering planned |
 | Chunking | Pluggable `Chunker` interface; structural (heading-aware) default, chosen by ablation against fixed-size, recursive and semantic | Partial — structural chunker only |

@@ -25,6 +25,7 @@ def test_gated_writes_are_marked():
     assert sorted(t.__name__ for t in GATED_WRITES) == sorted(EXPECTED_GATED_WRITES)
 
 
+# INTEGRATION TEST: this test uses the real Postgres (make db-up).
 @pytest.mark.parametrize("fn", GATED_WRITES, ids=lambda t: t.__name__)
 def test_gated_write_only_proposes(fn: Tool, seeded_db):
     # emp_001 has 18 days left, so a one-day leave request passes the balance check

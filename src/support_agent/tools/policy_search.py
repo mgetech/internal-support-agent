@@ -27,6 +27,24 @@ def fuse(rankings: list[list[str]], k: int = RRF_K) -> list[str]:
     return sorted(scores, key=lambda cid: scores[cid], reverse=True)
 
 
+def get_policy_version() -> str | None:
+    """The version of the policy corpus that search runs against, read from the chunks
+    that `search_policies` reads. It is None when there are no chunks. If the chunks come
+    from more than one version, for example after a partial re-seed, every version is
+    returned, joined with ", ", so a Decision Record never names a version that was not
+    used.
+    """
+    rows = db.fetch_all(
+        """
+        SELECT DISTINCT policy_version
+        FROM policy_chunks
+        WHERE chunker = 'structural'
+        ORDER BY policy_version
+        """
+    )
+    return ", ".join(row["policy_version"] for row in rows) or None
+
+
 def search_policies(query: str) -> str:
     """Search the HR and IT policies and return the 5 most relevant passages, each with
     its chunk id. Any claim you make from a passage must cite it as [chunk:<id>], using

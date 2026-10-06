@@ -17,6 +17,7 @@ def test_defaults_when_only_required_fields_given():
     settings = Settings(_env_file=None, **REQUIRED)
 
     assert settings.max_tool_calls_per_request == 8
+    assert settings.orphan_grace_minutes == 10
     assert settings.model_fallback_deployment == ""
     assert settings.retention_days_decisions == 1095
     assert settings.retention_days_audit == 1095
@@ -32,6 +33,7 @@ def test_loads_from_environment(monkeypatch):
     for key, value in REQUIRED.items():
         monkeypatch.setenv(key.upper(), value)
     monkeypatch.setenv("MAX_TOOL_CALLS_PER_REQUEST", "3")
+    monkeypatch.setenv("ORPHAN_GRACE_MINUTES", "2")
     monkeypatch.setenv("MODEL_FALLBACK_DEPLOYMENT", "gpt-4.1-mini")
     monkeypatch.setenv(
         "PRICE_TABLE_EUR",
@@ -43,6 +45,7 @@ def test_loads_from_environment(monkeypatch):
     settings = Settings(_env_file=None)
 
     assert settings.max_tool_calls_per_request == 3
+    assert settings.orphan_grace_minutes == 2
     assert settings.model_fallback_deployment == "gpt-4.1-mini"
     assert settings.price_table_eur == {"gpt-4.1": {"input_per_1k": 0.005, "output_per_1k": 0.015}}
     assert settings.retention_days_decisions == 30

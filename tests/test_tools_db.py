@@ -38,6 +38,7 @@ def test_fuse_ranks_ids_found_by_both_rankings_first():
     assert fuse([["a", "b"], ["c", "b"]])[0] == "b"
 
 
+# INTEGRATION TESTS: the tests below use the real Postgres (make db-up).
 @pytest.mark.parametrize(
     ("employee_id", "remaining"),
     [("emp_001", 18.0), ("emp_004", 3.5), ("emp_012", 0.0)],
