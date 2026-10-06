@@ -15,44 +15,23 @@ All data is synthetic.
 ## How a request flows
 
 ```mermaid
-flowchart TB
-    A["Request from a logged-in employee"] --> B["1. classify"]
-    B -- out of scope, or the model fails --> R["refuse: escalate"]
+flowchart LR
+    A["Request"] --> B["1. classify"]
     B --> C["2. agent"]
-    C -- tool calls --> T["3. tools"]
-    T -- results go back --> C
-    T -. search_policies .-> K[("Policy retrieval - RAG")]
-    T -. own records, outages .-> H[("Employee records<br>and IT outages")]
-    T ~~~ V["4. verify citations"]
-    C -- no more tool calls: draft answer --> V
-    C -- tool limit reached --> R
-    V -- bad citation, first time --> C
-    V -- bad citation, second time --> R
-    V -- passes --> F["5. finalize"]
-    R --> F
+    C -->|tool calls| T["3. tools"]
+    T -->|results| C
+    T -.-> K[("Policy retrieval - RAG")]
+    T -.-> H[("Records and outages")]
+    C -->|draft answer| V["4. verify citations"]
+    V -->|"bad citation: retry once"| C
+    V -->|passes| F["5. finalize"]
     F --> D[("Decision Record + audit event")]
-
-     A:::Ash
-     B:::Sky
-     R:::Rose
-     C:::Sky
-     T:::Peach
-     K:::Aqua
-     H:::Aqua
-     V:::Peach
-     F:::Pine
-     D:::Aqua
-    classDef Aqua stroke-width:1px, stroke-dasharray:none, stroke:#46EDC8, fill:#DEFFF8, color:#378E7A
-    classDef Sky stroke-width:1px, stroke-dasharray:none, stroke:#374D7C, fill:#E2EBFF, color:#374D7C
-    classDef Rose stroke-width:1px, stroke-dasharray:none, stroke:#FF5978, fill:#FFDFE5, color:#8E2236
-    classDef Pine stroke-width:1px, stroke-dasharray:none, stroke:#254336, fill:#27654A, color:#FFFFFF
-    classDef Peach stroke-width:1px, stroke-dasharray:none, stroke:#FBB35A, fill:#FFEFDB, color:#8F632D
-    classDef Ash stroke-width:1px, stroke-dasharray:none, stroke:#999999, fill:#EEEEEE, color:#000000
 ```
 
 The dotted lines show where the data comes from. An answer may cite only the chunks that
-the retrieval returned for this request. When the agent cannot continue safely, it
-escalates to a person instead of guessing.
+the retrieval returned for this request. A request that is out of scope, meets a model
+failure, reaches the tool limit or fails the citation check twice ends in `escalate`
+instead of an answer. Every path ends in `finalize`.
 
 ## Status
 
