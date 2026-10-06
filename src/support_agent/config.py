@@ -24,6 +24,10 @@ class Settings(BaseSettings):
 
     max_tool_calls_per_request: int = DEFAULT_MAX_TOOL_CALLS_PER_REQUEST
 
+    # a pending action without a Decision Record is flagged only after this long, so a
+    # request that is still running is never flagged. Read by reconciliation.py.
+    orphan_grace_minutes: int = 10
+
     # {"<deployment>": {"input_per_1k": eur, "output_per_1k": eur}} — embedding
     # deployments carry input_per_1k only. Read by costing.py.
     price_table_eur: dict[str, dict[str, float]] = Field(default_factory=dict)

@@ -19,6 +19,7 @@ Event = Literal[
     "action_rejected",
     "action_executed",
     "decision_recorded",
+    "orphan_flagged",
     "feedback_received",
     "model_call",
 ]

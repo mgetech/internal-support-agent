@@ -88,7 +88,7 @@ CREATE TABLE pending_actions (
 -- call, with the actor that performed it. actor: agent | employee:<id> |
 -- approver:<id> | system. event: tool_call | action_proposed |
 -- action_approved | action_rejected | action_executed | decision_recorded |
--- feedback_received | model_call.
+-- orphan_flagged | feedback_received | model_call.
 CREATE TABLE audit_log (
     id SERIAL PRIMARY KEY,
     request_id TEXT NOT NULL,
