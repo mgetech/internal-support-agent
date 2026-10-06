@@ -62,6 +62,7 @@ def test_unbound_record_raises_and_writes_nothing():
     assert conn.calls == []
 
 
+# INTEGRATION TEST: this test uses the real Postgres (make db-up).
 def test_record_persists_a_row(clean_db):
     with bind_request_context("emp_004", "req-3", "mcp"):
         record("tool_call", {"tool": "get_known_outages"}, actor="employee", conn=clean_db)

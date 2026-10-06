@@ -10,6 +10,7 @@ import pytest
 from support_agent.tools.policy_search import get_policy_version
 
 
+# INTEGRATION TESTS: the tests below use the real Postgres (make db-up).
 def test_the_version_comes_from_the_seeded_chunks(seeded_db):
     assert get_policy_version() == "2026-09.1"
 

@@ -117,6 +117,7 @@ def test_unbound_tool_raises(fn: Tool):
         fn(**sample_args(fn))
 
 
+# INTEGRATION TEST: this test uses the real Postgres (make db-up).
 @pytest.mark.parametrize("fn", TOOLS, ids=lambda t: t.__name__)
 def test_unbound_tool_writes_nothing(fn: Tool, clean_db):
     with pytest.raises(NoRequestContextError):

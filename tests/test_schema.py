@@ -28,6 +28,7 @@ EXPECTED_CHECK_CONSTRAINTS = {
 }
 
 
+# INTEGRATION TESTS: the tests below use the real Postgres (make db-up).
 def test_every_expected_table_exists(clean_db):
     rows = clean_db.execute(
         "select tablename from pg_tables where schemaname = 'public'"

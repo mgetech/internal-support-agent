@@ -232,6 +232,7 @@ def _fake_embed(texts):
     return [[0.0] * 1536 for _ in texts]
 
 
+# INTEGRATION TESTS: the tests below use the real Postgres (make db-up).
 def test_load_seed_data_populates_every_seeded_table(clean_db):
     load_seed_data(embed_fn=_fake_embed, conn=clean_db)
 

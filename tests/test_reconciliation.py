@@ -41,6 +41,7 @@ def get_flags(db):
     ).fetchall()
 
 
+# INTEGRATION TESTS: the tests below use the real Postgres (make db-up).
 def test_an_old_action_without_a_record_is_flagged_once(seeded_db):
     action_id = add_action(seeded_db, "req-1", age_minutes=11)
 

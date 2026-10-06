@@ -239,7 +239,7 @@ def test_a_request_without_an_outcome_cannot_be_recorded():
         build_record(final_state(outcome=None))
 
 
-# --- save_decision_record: writing to Postgres ---
+# --- INTEGRATION TESTS: save_decision_record writes to the real Postgres (make db-up) ---
 #
 # These tests use the `seeded_db` fixture (tests/conftest.py), which rebuilds the schema
 # and loads the seed data, so employee emp_004 exists. They are skipped without a database.
