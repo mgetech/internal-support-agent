@@ -50,8 +50,8 @@ instead of an answer. Every path ends in `finalize`.
 
 ## Status
 
-**Early.** The agent graph is built, but nothing serves it yet. There is no API or UI,
-so nobody can ask it a question. What exists today:
+**Work in progress.** The agent and its REST API are built. There is no UI yet, and the
+agent has not run against a live model: the tests use a scripted one. What exists today:
 
 - **Synthetic data.** Employees, leave balances, outages and policies, from one
   deterministic generator.
@@ -60,15 +60,22 @@ so nobody can ask it a question. What exists today:
 - **Typed tools.** Five tools. Read tools query the employee's own records. The model
   never writes SQL.
 - **Proposals, not writes.** Write tools add to an approval queue and change nothing.
+- **Role-checked approval.** Only an `hr_partner` or a `manager` can decide, never on their
+  own request. A decision locks the action, so it cannot be decided twice. An approval
+  makes the write and a rejection writes nothing.
+- **REST API.** `POST /chat`, the approval queue, Decision Records and feedback. Login is
+  a header stub for now. See [REST API](#rest-api).
 - **Hybrid retrieval.** Vector search and full-text search, joined by reciprocal rank
   fusion.
-- **Agent graph.** classify → agent ⇄ tools → verify → finalize, on LangGraph.
+- **Agent graph.** classify → agent ⇄ tools → verify → finalize, on LangGraph. A small
+  model classifies first, so a request that is out of scope ends before the agent and its
+  tools run.
 - **Citation check.** Every cited chunk must come from this request's search.
 - **Decision Records.** One saved record per request: outcome, reason, evidence, versions
   and cost.
 - **Model client.** Responses API, retry, fallback model and a cost in euros per call.
-- **Audit log.** Every tool call, proposal and model call, with the request id and the
-  actor.
+- **Audit log.** Every tool call, proposal, approval, execution, feedback and model call,
+  with the request id and the actor.
 - **Versioned prompts.** A prompt change without a version bump fails a test.
 - **Tests.** Unit, component and database integration tests, with no model keys needed.
   The security tests run for every tool.
@@ -106,12 +113,27 @@ Rough build order:
 | Tests | pytest, incl. DB-backed tests against the compose/CI Postgres | In place |
 | CI | GitHub Actions — ruff + pytest always; eval gate when model secrets are configured | Partial — lint and tests |
 | Packaging | Docker + docker-compose (db, api, ui) | Partial — db only |
-| Orchestration | **LangGraph** | Partial — graph built and tested with a scripted model; nothing serves it yet |
+| Orchestration | **LangGraph** | Partial — graph built, served by `POST /chat` and tested with a scripted model |
 | Model inference | **Azure OpenAI via AI Foundry** — a capable deployment for the agent loop, a small one for classification and claim extraction, `text-embedding-3-small` (1536-dim) | Partial — embeddings, and a model client with retry, fallback and cost; the graph uses the client, but only scripted replies are tested, with no live model run |
-| API | FastAPI | Planned |
+| API | FastAPI | Partial — see [REST API](#rest-api); login is a header stub |
 | Retrieval | Metadata pre-filtering → hybrid pgvector cosine + Postgres full-text ranking (`ts_rank_cd`), reciprocal-rank fusion (k=60), top-5 | Partial — hybrid search in place; metadata pre-filtering planned |
 | Chunking | Pluggable `Chunker` interface; structural (heading-aware) default, chosen by ablation against fixed-size, recursive and semantic | Partial — structural chunker only |
 | MCP | Official Python MCP SDK (FastMCP) exposing the tool belt; stdio + streamable HTTP | Planned |
 | Eval tooling | Own deterministic harness (gates, trajectory, retrieval) + **RAGAS** for answer quality | Planned |
 | Observability | **Langfuse** (cloud keys via `.env`; self-hostable for residency) | Planned |
 | UI | Streamlit — chat, approval queue, decision records, cost | Planned |
+
+## REST API
+
+| Route | What it does | Status |
+|---|---|---|
+| `POST /chat` | runs the agent for one message and returns the answer, the outcome and the request id | Built |
+| `GET /approvals` | the actions waiting for approval, with their payload. Approvers only | Built |
+| `POST /approvals/{id}` | approves or rejects an action. Approvers only, never their own request | Built |
+| `GET /decisions/{request_id}` | the Decision Record of a request: why the agent did what it did | Built |
+| `POST /feedback/{request_id}` | a rating and an optional comment on an answer | Built |
+| `GET /me/export` | everything the system holds about the employee | Planned |
+| `GET /usage` | requests, tokens and cost in euros per day and employee | Planned |
+
+The employee comes from the `X-Employee-Id` header, which is a login stub for now. No route
+takes an employee id in the path, the query or the body.
