@@ -80,6 +80,12 @@ audit log read the employee and the request id from there. No tool takes an empl
 as an argument, so the model cannot ask for another employee's data. A test checks this
 for every tool schema, and another test checks that no tool runs without a bound request.
 
+Over REST, the employee comes from the `X-Employee-Id` header. This is a login stub: the
+header is trusted, and the only check is that the employee exists. It is the one place
+where identity enters, so real login (OIDC) would change only that function. No route
+takes an employee id in the path, the query or the body, and a test checks this for every
+route. The steps for real login are in [before-deploying.md](before-deploying.md).
+
 ## Tools
 
 | Tool | What it does |
@@ -100,6 +106,62 @@ the first one.
 **Search.** `search_policies` joins two rankings with reciprocal rank fusion: vector
 similarity (pgvector, cosine) and Postgres full-text search. It returns the top five
 sections.
+
+## Approval
+
+A write tool only adds a row to `pending_actions`. The change happens later, in
+`guardrails/approval.py`, when a person decides. The agent process never runs this code.
+
+`decide(action_id, approver_id, approve)` works in this order:
+
+1. **Role.** The approver must be an `hr_partner` or a `manager`.
+2. **Self-approval.** The approver must not be the employee who made the request.
+3. **Lock.** Both checks only read. After them, the action row is locked with
+   `SELECT ... FOR UPDATE`, so two decisions on the same action run one after the other.
+   The second one finds the action already decided and is refused.
+4. **Reject.** The status becomes `rejected`. Nothing else is written.
+5. **Approve.** The status becomes `approved`, the write is made, and the status becomes
+   `executed`. A leave request adds a `leave_requests` row with the status `approved` and
+   adds its days to `pending_days`. A ticket adds a `tickets` row.
+
+All of this runs in one transaction. If the write fails, nothing is saved and the action
+stays pending.
+
+Every transition is audited with the approver as the actor, under the request id of the
+original proposal, so the whole story of a request is in one place. The `action_executed`
+event names the table and the row that was written. The business tables have no column
+that points back to the action, so this event is the only link from a row to its approval.
+A test uses it to check that no row in `leave_requests` or `tickets` exists without an
+executed action.
+
+**Design choices**
+- The role check comes before the action is read, so someone without the role cannot find
+  out which action ids exist.
+- The queue also shows the approver's own requests, with `can_decide` set to false. The
+  decision itself is still refused.
+- Approvers are found by the role in the `employees` table. A role in a login token would
+  not be trusted.
+
+## REST API
+
+| Route | What it does |
+|---|---|
+| `POST /chat` | runs the agent for one message and returns the answer, the outcome and the request id |
+| `GET /approvals` | the actions waiting for approval, with their payload. Approvers only |
+| `POST /approvals/{id}` | approves or rejects an action. The approver is the employee in the header |
+| `GET /decisions/{request_id}` | the Decision Record. The employee who made the request, or an approver, can read it |
+| `POST /feedback/{request_id}` | a rating (`up` or `down`) and an optional comment. Only the employee who made the request can send it |
+
+| Status | When |
+|---|---|
+| 401 | the header is missing, or the employee is unknown |
+| 403 | the employee may not do this: not an approver, or approving their own request |
+| 404 | the action or record does not exist. A record that the employee may not read gives the same answer |
+| 409 | the action was already decided |
+| 422 | the body is not valid. Extra fields are refused, so a body cannot carry an employee id |
+
+The graph is built on the first chat request and then reused. Tests replace it with a
+stub, so the API tests need no model keys.
 
 ## The graph
 
@@ -197,13 +259,12 @@ each, with the actor `system`. It does not change the action.
 
 We did not use one transaction for the whole request. It would stay open during the model
 calls, hold locks, and roll back the audit trail of a crashed request. Short transactions
-and a later check cost less. Nothing calls the check at startup yet, because there is no
-API.
+and a later check cost less. Nothing calls the check at startup yet.
 
 ## Audit log
 
-`audit_log` is append-only. Every tool call, proposal, model call and decision is written
-with the request id and the actor: `agent`, `employee:<id>`, `approver:<id>` or `system`.
+`audit_log` is append-only. Every tool call, proposal, approval, rejection, execution,
+feedback, model call and decision is written with the request id and the actor: `agent`, `employee:<id>`, `approver:<id>` or `system`.
 The request id and the employee come from the request context, never from an argument.
 
 ## Model client and cost
@@ -239,10 +300,14 @@ and the version does not.
 - **Component tests** run the real graph with a scripted model and fake tools. The
   Decision Record is collected in a list, so there is no database.
 - **Integration tests** use the compose Postgres (`make db-up`). They cover the tools, the
-  schema, the audit log, saving Decision Records, the policy version and the orphan check.
-  A comment marks them, and they are skipped when no database is reachable.
+  schema, the audit log, saving Decision Records, the policy version, the orphan check and
+  the approval. A comment marks them, and they are skipped when no database is reachable.
+- **API tests** call the routes with a stub in place of the graph. The approval gate has
+  end-to-end tests: the real tools propose, the API decides, and a check confirms that no
+  row in `leave_requests` or `tickets` exists without an executed action.
 - **Security tests** run for every tool: no identity argument, no run without a bound
-  request, and write tools only add to the approval queue.
+  request, and write tools only add to the approval queue. A test also checks that no
+  route takes an employee id, except through the header.
 
 ## Known limits
 
@@ -254,4 +319,10 @@ and the version does not.
   record name the new version.
 - No test runs the real graph with the real database from start to end, and no test calls
   a live model.
-- There is no API yet, so nothing calls the orphan check at startup.
+- Login is a header stub. Anyone who knows the header can act as any employee.
+- Nothing calls the orphan check at startup.
+- Pending actions never expire. The `expired` status exists, but nothing sets it.
+- `GET /me/export` and `GET /usage` are not built.
+
+What stands between this and a deployment is listed in
+[before-deploying.md](before-deploying.md).
