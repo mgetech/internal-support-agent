@@ -21,6 +21,31 @@ class AlreadyDecidedError(Exception):
     """Raised when an action was approved, rejected or expired before this decision."""
 
 
+def validate_approver_role(approver_id: str) -> None:
+    """Raise PermissionError if the employee does not have an approver role."""
+    approver = db.fetch_one("SELECT role FROM employees WHERE id = %s", (approver_id,))
+    if approver is None or approver["role"] not in APPROVER_ROLES:
+        raise PermissionError("you are not allowed to approve an action")
+
+
+def get_pending_actions(approver_id: str) -> list[dict[str, Any]]:
+    """The actions still waiting for approval, oldest first, with their payload. Each one
+    has `can_decide`, which is false for the approver's own requests, because they cannot
+    approve those. Raises PermissionError if the employee is not an approver.
+    """
+    validate_approver_role(approver_id)
+    return db.fetch_all(
+        """
+        SELECT id, request_id, employee_id, tool, payload, created_at,
+               employee_id <> %s AS can_decide
+        FROM pending_actions
+        WHERE status = 'pending_approval'
+        ORDER BY id
+        """,
+        (approver_id,),
+    )
+
+
 def validate_approver(action_id: int, approver_id: str) -> None:
     """Raise if the approver may not decide on this action. The role is checked first.
     The checks only read: no row is locked.
@@ -28,9 +53,7 @@ def validate_approver(action_id: int, approver_id: str) -> None:
     Raises PermissionError if the approver does not have an approver role, or is the
     employee who made the request. Raises LookupError if the action does not exist.
     """
-    approver = db.fetch_one("SELECT role FROM employees WHERE id = %s", (approver_id,))
-    if approver is None or approver["role"] not in APPROVER_ROLES:
-        raise PermissionError("you are not allowed to approve an action")
+    validate_approver_role(approver_id)
 
     action = db.fetch_one("SELECT employee_id FROM pending_actions WHERE id = %s", (action_id,))
     if action is None:
@@ -62,7 +85,7 @@ def _insert_leave_request(cur: psycopg.Cursor, action: dict[str, Any]) -> dict[s
     )
     if updated.rowcount != 1:
         # raising rolls back the insert and the approval
-        raise LookupError(f"no leave balance on record for {start_date.year}")
+        raise RuntimeError(f"no leave balance on record for {start_date.year}")
     return {"table": "leave_requests", "id": row["id"]}
 
 

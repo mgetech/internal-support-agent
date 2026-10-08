@@ -5,8 +5,9 @@ names the employee, and the request is bound to that employee before the graph r
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from langgraph.graph.state import CompiledStateGraph
@@ -15,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from support_agent import db
 from support_agent.config import get_settings
 from support_agent.graph import build_graph
+from support_agent.guardrails.approval import AlreadyDecidedError, decide, get_pending_actions
 from support_agent.llm import get_llm_client
 from support_agent.request_context import bind_request_context
 from support_agent.state import Outcome, new_state
@@ -33,6 +35,28 @@ class ChatResponse(BaseModel):
     answer: str
     outcome: Outcome
     request_id: str
+
+
+class PendingAction(BaseModel):
+    id: int
+    request_id: str
+    employee_id: str
+    tool: str
+    payload: dict[str, Any]
+    created_at: datetime
+    # false for the caller's own requests: the decision would be refused with a 403
+    can_decide: bool
+
+
+class ApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject"]
+
+
+class ApprovalResponse(BaseModel):
+    action_id: int
+    status: Literal["executed", "rejected"]
 
 
 def get_current_employee_id(x_employee_id: Annotated[str | None, Header()] = None) -> str:
@@ -75,3 +99,32 @@ def create_chat(
     return ChatResponse(
         answer=result["messages"][-1].text, outcome=result["outcome"], request_id=request_id
     )
+
+
+@app.get("/approvals")
+def get_approvals(
+    approver_id: Annotated[str, Depends(get_current_employee_id)],
+) -> list[PendingAction]:
+    """The actions waiting for approval. The employee in the header must be an approver."""
+    try:
+        return get_pending_actions(approver_id)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+@app.post("/approvals/{action_id}")
+def create_approval(
+    action_id: int,
+    body: ApprovalRequest,
+    approver_id: Annotated[str, Depends(get_current_employee_id)],
+) -> ApprovalResponse:
+    """Approve or reject an action. The approver is the employee in the header."""
+    try:
+        status = decide(action_id, approver_id, approve=body.decision == "approve")
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except AlreadyDecidedError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return ApprovalResponse(action_id=action_id, status=status)

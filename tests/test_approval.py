@@ -223,7 +223,7 @@ def test_failed_write_leaves_the_action_pending(seeded_db):
     action_id = _propose(seeded_db, "emp_001")
     seeded_db.execute("DELETE FROM leave_balances WHERE employee_id = 'emp_001'")
 
-    with pytest.raises(LookupError, match="no leave balance"):
+    with pytest.raises(RuntimeError, match="no leave balance"):
         decide(action_id, "emp_005", approve=True)
 
     assert _status(seeded_db, action_id) == ("pending_approval", None)

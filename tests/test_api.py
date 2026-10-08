@@ -148,3 +148,175 @@ def test_chat_needs_a_message(body, client, graph, seeded_db):
 
     assert response.status_code == 422
     assert graph.contexts == []
+
+
+def _propose(conn, employee_id: str) -> int:
+    """Insert a pending one-day leave request for the employee and return its id."""
+    return conn.execute(
+        """
+        INSERT INTO pending_actions (request_id, employee_id, tool, payload)
+        VALUES ('req-api', %s, 'submit_leave_request',
+                '{"start_date": "2026-11-02", "end_date": "2026-11-02", "working_days": 1}')
+        RETURNING id
+        """,
+        (employee_id,),
+    ).fetchone()[0]
+
+
+def _approver(employee_id: str) -> dict[str, str]:
+    return {"X-Employee-Id": employee_id}
+
+
+def test_approvals_without_the_header_are_unauthorized(client):
+    assert client.get("/approvals").status_code == 401
+    assert client.post("/approvals/1", json={"decision": "approve"}).status_code == 401
+
+
+def test_approval_queue_lists_pending_actions_with_payload(client, seeded_db):
+    first = _propose(seeded_db, "emp_001")
+    second = _propose(seeded_db, "emp_002")
+
+    response = client.get("/approvals", headers=_approver("emp_005"))
+
+    assert response.status_code == 200
+    queue = response.json()
+    assert [item["id"] for item in queue] == [first, second]
+    assert queue[0]["employee_id"] == "emp_001"
+    assert queue[0]["tool"] == "submit_leave_request"
+    assert [item["can_decide"] for item in queue] == [True, True]
+    assert queue[0]["payload"] == {
+        "start_date": "2026-11-02",
+        "end_date": "2026-11-02",
+        "working_days": 1,
+    }
+
+
+def test_approval_queue_leaves_out_decided_actions(client, seeded_db):
+    decided = _propose(seeded_db, "emp_001")
+    open_action = _propose(seeded_db, "emp_002")
+    client.post(f"/approvals/{decided}", json={"decision": "reject"}, headers=_approver("emp_010"))
+
+    queue = client.get("/approvals", headers=_approver("emp_005")).json()
+
+    assert [item["id"] for item in queue] == [open_action]
+
+
+def test_approval_queue_marks_own_requests_as_not_decidable(client, seeded_db):
+    other = _propose(seeded_db, "emp_001")
+    own = _propose(seeded_db, "emp_005")
+
+    queue = client.get("/approvals", headers=_approver("emp_005")).json()
+
+    assert [(item["id"], item["can_decide"]) for item in queue] == [(other, True), (own, False)]
+    # the flag is only a hint: the decision itself is still refused
+    response = client.post(
+        f"/approvals/{own}", json={"decision": "approve"}, headers=_approver("emp_005")
+    )
+    assert response.status_code == 403
+
+
+def test_approval_queue_is_closed_to_employees(client, seeded_db):
+    _propose(seeded_db, "emp_001")
+
+    response = client.get("/approvals", headers=_approver("emp_002"))
+
+    assert response.status_code == 403
+
+
+def test_approving_executes_the_action(client, seeded_db):
+    action_id = _propose(seeded_db, "emp_001")
+
+    response = client.post(
+        f"/approvals/{action_id}", json={"decision": "approve"}, headers=_approver("emp_005")
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"action_id": action_id, "status": "executed"}
+    row = seeded_db.execute(
+        "SELECT status, decided_by FROM pending_actions WHERE id = %s", (action_id,)
+    ).fetchone()
+    assert row == ("executed", "emp_005")
+    assert seeded_db.execute("SELECT count(*) FROM leave_requests").fetchone()[0] == 1
+
+
+def test_rejecting_writes_nothing(client, seeded_db):
+    action_id = _propose(seeded_db, "emp_001")
+
+    response = client.post(
+        f"/approvals/{action_id}", json={"decision": "reject"}, headers=_approver("emp_010")
+    )
+
+    assert response.json() == {"action_id": action_id, "status": "rejected"}
+    assert seeded_db.execute("SELECT count(*) FROM leave_requests").fetchone()[0] == 0
+
+
+def test_the_approver_comes_from_the_header(client, seeded_db):
+    action_id = _propose(seeded_db, "emp_001")
+
+    client.post(
+        f"/approvals/{action_id}", json={"decision": "approve"}, headers=_approver("emp_010")
+    )
+
+    decided_by = seeded_db.execute(
+        "SELECT decided_by FROM pending_actions WHERE id = %s", (action_id,)
+    ).fetchone()[0]
+    assert decided_by == "emp_010"
+
+
+def test_an_employee_cannot_decide(client, seeded_db):
+    action_id = _propose(seeded_db, "emp_001")
+
+    response = client.post(
+        f"/approvals/{action_id}", json={"decision": "approve"}, headers=_approver("emp_002")
+    )
+
+    assert response.status_code == 403
+    assert seeded_db.execute("SELECT count(*) FROM leave_requests").fetchone()[0] == 0
+
+
+def test_an_approver_cannot_decide_on_their_own_request(client, seeded_db):
+    action_id = _propose(seeded_db, "emp_005")
+
+    response = client.post(
+        f"/approvals/{action_id}", json={"decision": "approve"}, headers=_approver("emp_005")
+    )
+
+    assert response.status_code == 403
+
+
+def test_deciding_on_an_unknown_action_is_not_found(client, seeded_db):
+    response = client.post(
+        "/approvals/999", json={"decision": "approve"}, headers=_approver("emp_005")
+    )
+
+    assert response.status_code == 404
+
+
+def test_a_second_decision_is_a_conflict(client, seeded_db):
+    action_id = _propose(seeded_db, "emp_001")
+    client.post(
+        f"/approvals/{action_id}", json={"decision": "approve"}, headers=_approver("emp_005")
+    )
+
+    response = client.post(
+        f"/approvals/{action_id}", json={"decision": "approve"}, headers=_approver("emp_010")
+    )
+
+    assert response.status_code == 409
+    assert seeded_db.execute("SELECT count(*) FROM leave_requests").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"decision": "maybe"}, {"decision": "approve", "approver_id": "emp_010"}],
+    ids=["missing", "unknown-value", "extra-field"],
+)
+def test_a_bad_decision_is_refused(body, client, seeded_db):
+    action_id = _propose(seeded_db, "emp_001")
+
+    response = client.post(f"/approvals/{action_id}", json=body, headers=_approver("emp_005"))
+
+    assert response.status_code == 422
+    assert seeded_db.execute(
+        "SELECT status FROM pending_actions WHERE id = %s", (action_id,)
+    ).fetchone() == ("pending_approval",)
