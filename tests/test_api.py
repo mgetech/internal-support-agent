@@ -4,6 +4,8 @@ requests that name an employee read the real employees table (make db-up).
 
 from __future__ import annotations
 
+import json
+from datetime import date
 from typing import Any
 
 import pytest
@@ -15,6 +17,7 @@ from tests.test_tool_contracts import is_identity_field, property_names
 from support_agent.api import app, get_graph
 from support_agent.decision_record import save_decision_record
 from support_agent.request_context import bind_request_context, get_request_context
+from support_agent.tools.hr_it import create_ticket, submit_leave_request
 
 CHAT_HEADERS = {"X-Employee-Id": "emp_001"}
 
@@ -456,3 +459,176 @@ def test_bad_feedback_is_refused(body, client, seeded_db):
 
     assert response.status_code == 422
     assert seeded_db.execute("SELECT count(*) FROM feedback").fetchone()[0] == 0
+
+
+# --- the approval gate end to end: the real tools propose, the API decides ---
+
+
+def _propose_with_tool(employee_id: str, request_id: str, tool, **args) -> int:
+    """Let the real gated write tool make the proposal, as the agent would."""
+    with bind_request_context(employee_id, request_id, "rest"):
+        result = json.loads(tool(**args))
+    assert result["proposed"] is True
+    return result["action_id"]
+
+
+def _decide(client, action_id: int, approver_id: str, decision: str):
+    return client.post(
+        f"/approvals/{action_id}", json={"decision": decision}, headers=_approver(approver_id)
+    )
+
+
+def _assert_no_unapproved_writes(conn) -> None:
+    """Every row in a business table is behind an `executed` pending action: the audit
+    event of that execution names the table and the row id.
+    """
+    for table in ("leave_requests", "tickets"):
+        rows = sorted(r[0] for r in conn.execute(f"SELECT id FROM {table}"))
+        executed = sorted(
+            r[0]
+            for r in conn.execute(
+                """
+                SELECT (event.payload->'written'->>'id')::int
+                FROM audit_log AS event
+                JOIN pending_actions AS action
+                  ON action.id = (event.payload->>'action_id')::int
+                WHERE event.event = 'action_executed'
+                  AND event.payload->'written'->>'table' = %s
+                  AND action.status = 'executed'
+                """,
+                (table,),
+            )
+        )
+        assert rows == executed, table
+
+
+def _leave_request(**overrides) -> dict[str, Any]:
+    return {
+        "start_date": date(2026, 11, 2),
+        "end_date": date(2026, 11, 3),
+        "working_days": 2.0,
+        **overrides,
+    }
+
+
+def _count(conn, table: str) -> int:
+    return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+
+
+def _pending_days(conn, employee_id: str) -> float:
+    return float(
+        conn.execute(
+            "SELECT pending_days FROM leave_balances WHERE employee_id = %s AND year = 2026",
+            (employee_id,),
+        ).fetchone()[0]
+    )
+
+
+def test_a_leave_request_needs_an_approver_before_it_is_written(client, seeded_db):
+    action_id = _propose_with_tool("emp_001", "req-e2e-1", submit_leave_request, **_leave_request())
+    pending_before = _pending_days(seeded_db, "emp_001")
+
+    # the proposal is in the queue with its payload, and nothing is written yet
+    queue = client.get("/approvals", headers=_approver("emp_005")).json()
+    assert [(item["id"], item["tool"], item["can_decide"]) for item in queue] == [
+        (action_id, "submit_leave_request", True)
+    ]
+    assert queue[0]["payload"]["working_days"] == 2.0
+    assert _count(seeded_db, "leave_requests") == 0
+
+    # the wrong roles are refused, and still nothing is written
+    assert _decide(client, action_id, "emp_001", "approve").status_code == 403
+    assert _decide(client, action_id, "emp_002", "approve").status_code == 403
+    assert _count(seeded_db, "leave_requests") == 0
+
+    assert _decide(client, action_id, "emp_005", "approve").json() == {
+        "action_id": action_id,
+        "status": "executed",
+    }
+
+    rows = seeded_db.execute(
+        "SELECT employee_id, start_date, end_date, days, status FROM leave_requests"
+    ).fetchall()
+    assert [(r[0], str(r[1]), str(r[2]), float(r[3]), r[4]) for r in rows] == [
+        ("emp_001", "2026-11-02", "2026-11-03", 2.0, "approved")
+    ]
+    assert _pending_days(seeded_db, "emp_001") == pending_before + 2
+
+    # a second decision is refused and changes nothing
+    assert _decide(client, action_id, "emp_010", "reject").status_code == 409
+    assert _count(seeded_db, "leave_requests") == 1
+    assert _pending_days(seeded_db, "emp_001") == pending_before + 2
+    _assert_no_unapproved_writes(seeded_db)
+
+
+def test_an_approver_cannot_approve_their_own_leave_request(client, seeded_db):
+    action_id = _propose_with_tool("emp_005", "req-e2e-2", submit_leave_request, **_leave_request())
+
+    assert _decide(client, action_id, "emp_005", "approve").status_code == 403
+    assert _count(seeded_db, "leave_requests") == 0
+
+    assert _decide(client, action_id, "emp_010", "approve").status_code == 200
+    assert seeded_db.execute("SELECT employee_id FROM leave_requests").fetchall() == [("emp_005",)]
+    _assert_no_unapproved_writes(seeded_db)
+
+
+def test_a_rejected_leave_request_writes_nothing(client, seeded_db):
+    action_id = _propose_with_tool("emp_001", "req-e2e-3", submit_leave_request, **_leave_request())
+    pending_before = _pending_days(seeded_db, "emp_001")
+
+    assert _decide(client, action_id, "emp_005", "reject").json()["status"] == "rejected"
+
+    assert _count(seeded_db, "leave_requests") == 0
+    assert _pending_days(seeded_db, "emp_001") == pending_before
+    assert _decide(client, action_id, "emp_010", "approve").status_code == 409
+    assert _count(seeded_db, "leave_requests") == 0
+    _assert_no_unapproved_writes(seeded_db)
+
+
+def test_a_ticket_needs_an_approver_before_it_is_opened(client, seeded_db):
+    ticket = {"category": "access", "title": "VPN access", "body": "I need the VPN."}
+    action_id = _propose_with_tool("emp_001", "req-e2e-4", create_ticket, **ticket)
+    assert _count(seeded_db, "tickets") == 0
+
+    assert _decide(client, action_id, "emp_002", "approve").status_code == 403
+    assert _decide(client, action_id, "emp_010", "approve").status_code == 200
+
+    rows = seeded_db.execute(
+        "SELECT employee_id, category, title, body, status, created_by FROM tickets"
+    ).fetchall()
+    assert rows == [("emp_001", "access", "VPN access", "I need the VPN.", "open", "emp_001")]
+    _assert_no_unapproved_writes(seeded_db)
+
+
+def test_no_business_row_exists_without_an_executed_action(client, seeded_db):
+    december = _leave_request(
+        start_date=date(2026, 12, 7), end_date=date(2026, 12, 7), working_days=1.0
+    )
+    approved = _propose_with_tool("emp_001", "req-e2e-5", submit_leave_request, **_leave_request())
+    rejected = _propose_with_tool("emp_002", "req-e2e-6", submit_leave_request, **december)
+    waiting = _propose_with_tool(
+        "emp_003", "req-e2e-7", create_ticket, category="software", title="IDE", body="License."
+    )
+    opened = _propose_with_tool(
+        "emp_004", "req-e2e-8", create_ticket, category="hardware", title="Dock", body="Broken."
+    )
+
+    _decide(client, approved, "emp_005", "approve")
+    _decide(client, rejected, "emp_005", "reject")
+    _decide(client, opened, "emp_010", "approve")
+
+    status = seeded_db.execute("SELECT status FROM pending_actions WHERE id = %s", (waiting,))
+    assert status.fetchone() == ("pending_approval",)
+    assert _count(seeded_db, "leave_requests") == 1
+    assert _count(seeded_db, "tickets") == 1
+    _assert_no_unapproved_writes(seeded_db)
+
+
+def test_the_check_for_unapproved_writes_finds_a_row_written_around_the_gate(seeded_db):
+    seeded_db.execute(
+        "INSERT INTO leave_requests (employee_id, start_date, end_date, days)"
+        " VALUES ('emp_001', '2026-11-02', '2026-11-02', 1)"
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_no_unapproved_writes(seeded_db)
