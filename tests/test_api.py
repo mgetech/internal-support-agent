@@ -9,10 +9,12 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
+from tests.graph_helpers import CLASSIFIED, ScriptedLLM, call_reply, run_graph, text_reply
 from tests.test_tool_contracts import is_identity_field, property_names
 
 from support_agent.api import app, get_graph
-from support_agent.request_context import get_request_context
+from support_agent.decision_record import save_decision_record
+from support_agent.request_context import bind_request_context, get_request_context
 
 CHAT_HEADERS = {"X-Employee-Id": "emp_001"}
 
@@ -320,3 +322,137 @@ def test_a_bad_decision_is_refused(body, client, seeded_db):
     assert seeded_db.execute(
         "SELECT status FROM pending_actions WHERE id = %s", (action_id,)
     ).fetchone() == ("pending_approval",)
+
+
+def _save_record() -> dict[str, Any]:
+    """Run the wired graph for emp_001 (request "req-1", fake tools, scripted model) and
+    save its Decision Record. Returns the record as the API should show it.
+    """
+    records = []
+    llm = ScriptedLLM(
+        CLASSIFIED,
+        call_reply("call_1", "get_leave_balance", "{}"),
+        text_reply("You have 18 days left."),
+    )
+    run_graph(llm, saved_records=records)
+    with bind_request_context("emp_001", "req-1", "rest"):
+        save_decision_record(records[0])
+    return records[0].model_dump()
+
+
+def test_decision_endpoints_without_the_header_are_unauthorized(client):
+    assert client.get("/decisions/req-1").status_code == 401
+    assert client.post("/feedback/req-1", json={"rating": "up"}).status_code == 401
+
+
+def test_decision_record_explains_the_answer_without_running_anything(client, seeded_db):
+    saved = _save_record()
+
+    response = client.get("/decisions/req-1", headers=CHAT_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == saved
+    assert body["outcome"] == "resolve"
+    assert body["summary"] == "Resolved using get_leave_balance."
+    assert [item["type"] for item in body["evidence"]] == [
+        "classification",
+        "tool_result",
+        "verifier_verdict",
+    ]
+
+
+@pytest.mark.parametrize("reader", ["emp_005", "emp_010"], ids=["hr_partner", "manager"])
+def test_an_approver_can_read_another_employees_record(reader, client, seeded_db):
+    _save_record()
+
+    response = client.get("/decisions/req-1", headers=_approver(reader))
+
+    assert response.status_code == 200
+
+
+def test_another_employee_cannot_read_the_record(client, seeded_db):
+    _save_record()
+
+    response = client.get("/decisions/req-1", headers=_approver("emp_002"))
+
+    assert response.status_code == 404
+
+
+def test_an_unknown_request_is_not_found(client, seeded_db):
+    assert client.get("/decisions/req-999", headers=CHAT_HEADERS).status_code == 404
+
+
+def test_feedback_is_saved_with_a_rating_and_a_comment(client, seeded_db):
+    _save_record()
+
+    response = client.post(
+        "/feedback/req-1", json={"rating": "down", "comment": "Wrong year."}, headers=CHAT_HEADERS
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["request_id"] == "req-1"
+    assert body["rating"] == "down"
+    rows = seeded_db.execute(
+        "SELECT id, request_id, employee_id, rating, comment, triage_status FROM feedback"
+    ).fetchall()
+    assert rows == [(body["id"], "req-1", "emp_001", "down", "Wrong year.", "new")]
+
+
+def test_feedback_comment_is_optional(client, seeded_db):
+    _save_record()
+
+    response = client.post("/feedback/req-1", json={"rating": "up"}, headers=CHAT_HEADERS)
+
+    assert response.status_code == 201
+    assert seeded_db.execute("SELECT comment FROM feedback").fetchone() == (None,)
+
+
+def test_feedback_is_audited_under_the_request(client, seeded_db):
+    _save_record()
+
+    response = client.post("/feedback/req-1", json={"rating": "up"}, headers=CHAT_HEADERS)
+
+    events = seeded_db.execute(
+        "SELECT request_id, actor, payload FROM audit_log WHERE event = 'feedback_received'"
+    ).fetchall()
+    assert events == [
+        ("req-1", "employee:emp_001", {"feedback_id": response.json()["id"], "rating": "up"})
+    ]
+
+
+def test_only_the_requester_can_rate_the_answer(client, seeded_db):
+    _save_record()
+
+    for reader in ("emp_002", "emp_005"):
+        response = client.post("/feedback/req-1", json={"rating": "up"}, headers=_approver(reader))
+        assert response.status_code == 404
+
+    assert seeded_db.execute("SELECT count(*) FROM feedback").fetchone()[0] == 0
+    assert seeded_db.execute("SELECT count(*) FROM audit_log").fetchone()[0] == 1
+
+
+def test_feedback_on_an_unknown_request_is_not_found(client, seeded_db):
+    response = client.post("/feedback/req-999", json={"rating": "up"}, headers=CHAT_HEADERS)
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"rating": "great"},
+        {"rating": "up", "comment": "x" * 1001},
+        {"rating": "up", "employee_id": "emp_002"},
+    ],
+    ids=["missing", "unknown-rating", "long-comment", "extra-field"],
+)
+def test_bad_feedback_is_refused(body, client, seeded_db):
+    _save_record()
+
+    response = client.post("/feedback/req-1", json=body, headers=CHAT_HEADERS)
+
+    assert response.status_code == 422
+    assert seeded_db.execute("SELECT count(*) FROM feedback").fetchone()[0] == 0

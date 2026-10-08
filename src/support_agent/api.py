@@ -15,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from support_agent import db
 from support_agent.config import get_settings
+from support_agent.decision_record import DecisionRecord, get_decision_record
+from support_agent.feedback import Rating, create_feedback
 from support_agent.graph import build_graph
 from support_agent.guardrails.approval import AlreadyDecidedError, decide, get_pending_actions
 from support_agent.llm import get_llm_client
@@ -57,6 +59,19 @@ class ApprovalRequest(BaseModel):
 class ApprovalResponse(BaseModel):
     action_id: int
     status: Literal["executed", "rejected"]
+
+
+class FeedbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rating: Rating
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+class FeedbackResponse(BaseModel):
+    id: int
+    request_id: str
+    rating: Rating
 
 
 def get_current_employee_id(x_employee_id: Annotated[str | None, Header()] = None) -> str:
@@ -128,3 +143,30 @@ def create_approval(
     except AlreadyDecidedError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     return ApprovalResponse(action_id=action_id, status=status)
+
+
+@app.get("/decisions/{request_id}")
+def get_decision(
+    request_id: str, employee_id: Annotated[str, Depends(get_current_employee_id)]
+) -> DecisionRecord:
+    """The Decision Record of a request. The employee who made it, or an approver, can
+    read it. Anyone else gets a 404, the same as for a request that does not exist.
+    """
+    try:
+        return get_decision_record(request_id, employee_id)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.post("/feedback/{request_id}", status_code=201)
+def create_request_feedback(
+    request_id: str,
+    body: FeedbackRequest,
+    employee_id: Annotated[str, Depends(get_current_employee_id)],
+) -> FeedbackResponse:
+    """Rate the answer to a request. Only the employee who made the request can."""
+    try:
+        feedback_id = create_feedback(request_id, employee_id, body.rating, body.comment)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return FeedbackResponse(id=feedback_id, request_id=request_id, rating=body.rating)

@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict
 
 from support_agent import audit, db
 from support_agent.costing import model_calls, request_total_cost
+from support_agent.guardrails.approval import APPROVER_ROLES
 from support_agent.request_context import Channel, get_request_context
 from support_agent.state import AgentState, Outcome
 
@@ -156,3 +157,28 @@ def save_decision_record(record: DecisionRecord) -> None:
             actor="system",
             conn=cur,
         )
+
+
+def get_decision_record(request_id: str, reader_id: str) -> DecisionRecord:
+    """Read one record back. The employee who made the request may read it, and so may
+    an approver. Raises LookupError if there is no such record, or if the reader may not
+    read it: the two cases look the same, so a request id cannot be used to find out
+    what exists.
+    """
+    row = db.fetch_one(
+        """
+        SELECT request_id, employee_id, channel, outcome, summary, evidence, citations,
+               policy_version, prompt_versions, verifier, model_calls, total_tokens,
+               total_cost_eur, latency_ms, trace_id
+        FROM decision_records
+        WHERE request_id = %s
+          AND (
+              employee_id = %s
+              OR EXISTS (SELECT 1 FROM employees WHERE id = %s AND role = ANY(%s))
+          )
+        """,
+        (request_id, reader_id, reader_id, list(APPROVER_ROLES)),
+    )
+    if row is None:
+        raise LookupError(f"no decision record {request_id}")
+    return DecisionRecord(**row)
