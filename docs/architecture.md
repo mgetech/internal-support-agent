@@ -84,7 +84,7 @@ Over REST, the employee comes from the `X-Employee-Id` header. This is a login s
 header is trusted, and the only check is that the employee exists. It is the one place
 where identity enters, so real login (OIDC) would change only that function. No route
 takes an employee id in the path, the query or the body, and a test checks this for every
-route. The steps for real login are in [before-deploying.md](before-deploying.md).
+route.
 
 ## Tools
 
@@ -323,6 +323,3 @@ and the version does not.
 - Nothing calls the orphan check at startup.
 - Pending actions never expire. The `expired` status exists, but nothing sets it.
 - `GET /me/export` and `GET /usage` are not built.
-
-What stands between this and a deployment is listed in
-[before-deploying.md](before-deploying.md).
