@@ -54,7 +54,8 @@ instead of an answer. Every path ends in `finalize`.
 agent has not run against a live model: the tests use a scripted one. What exists today:
 
 - **Synthetic data.** Employees, leave balances, outages and policies, from one
-  deterministic generator.
+  deterministic generator. The policies in `data/policies` are fictional, written for
+  testing, and are not legal advice.
 - **Identity from the session.** Tools read the employee from the request. The model
   never gives an employee id, and no tool accepts one.
 - **Typed tools.** Five tools. Read tools query the employee's own records. The model
@@ -137,3 +138,7 @@ Rough build order:
 
 The employee comes from the `X-Employee-Id` header, which is a login stub for now. No route
 takes an employee id in the path, the query or the body.
+
+## License
+
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
