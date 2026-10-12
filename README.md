@@ -99,7 +99,7 @@ Rough build order:
 - **Depth** — the same tool belt over MCP, with identity bound at session
   initialization rather than passed as an argument; adversarial scenarios (prompt
   injection, colleague-data probing, approval bypass); retrieval evaluation and the
-  chunking ablation, with tables published.
+  chunking ablation, with a re-ranking comparison, and tables published.
 - **Governance** — DSAR export, retention purge, and a database-level assertion that no
   record was ever written without passing through human approval.
 - **Observability and feedback** — per-node traces with cost and latency budgets, a

@@ -107,6 +107,9 @@ the first one.
 similarity (pgvector, cosine) and Postgres full-text search. It returns the top five
 sections.
 
+There is no re-ranking stage after the fusion: the corpus is small, the top five is
+already a tenth of it, and the agent reads all five sections.
+
 ## Approval
 
 A write tool only adds a row to `pending_actions`. The change happens later, in
