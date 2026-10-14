@@ -506,7 +506,6 @@ def _leave_request(**overrides) -> dict[str, Any]:
     return {
         "start_date": date(2026, 11, 2),
         "end_date": date(2026, 11, 3),
-        "working_days": 2.0,
         **overrides,
     }
 
@@ -601,9 +600,7 @@ def test_a_ticket_needs_an_approver_before_it_is_opened(client, seeded_db):
 
 
 def test_no_business_row_exists_without_an_executed_action(client, seeded_db):
-    december = _leave_request(
-        start_date=date(2026, 12, 7), end_date=date(2026, 12, 7), working_days=1.0
-    )
+    december = _leave_request(start_date=date(2026, 12, 7), end_date=date(2026, 12, 7))
     approved = _propose_with_tool("emp_001", "req-e2e-5", submit_leave_request, **_leave_request())
     rejected = _propose_with_tool("emp_002", "req-e2e-6", submit_leave_request, **december)
     waiting = _propose_with_tool(

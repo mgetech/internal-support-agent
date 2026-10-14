@@ -9,6 +9,7 @@ import json
 from datetime import date
 
 import pytest
+from data.generate import GENERATED_AS_OF
 from tests.tool_args import sample_args
 
 from support_agent.request_context import bind_request_context
@@ -21,6 +22,7 @@ from support_agent.tools import (
     search_policies,
     submit_leave_request,
 )
+from support_agent.tools.hr_it import calculate_working_days
 from support_agent.tools.policy_search import fuse
 
 
@@ -56,26 +58,83 @@ def test_known_outages_lists_only_unresolved_ones(seeded_db):
     assert [(o["system"], o["status"]) for o in outages] == [("vpn", "identified")]
 
 
+@pytest.mark.parametrize(
+    ("start", "end", "expected"),
+    [
+        (date(2026, 11, 2), date(2026, 11, 13), 10),  # two full weeks
+        (date(2026, 11, 6), date(2026, 11, 9), 2),  # Friday to Monday: the weekend is out
+        (date(2026, 11, 2), date(2026, 11, 2), 1),
+        (date(2026, 11, 7), date(2026, 11, 8), 0),  # Saturday and Sunday only
+    ],
+)
+def test_working_days_are_monday_to_friday(start, end, expected):
+    assert calculate_working_days(start, end) == expected
+
+
+def test_the_tool_counts_the_working_days_itself(seeded_db):
+    result = _as("emp_001", submit_leave_request, date(2026, 11, 2), date(2026, 11, 13))
+
+    assert result["proposed"] is True
+    assert result["working_days"] == 10
+    payload = seeded_db.execute("SELECT payload FROM pending_actions").fetchone()[0]
+    assert payload["working_days"] == 10
+
+
+def test_a_range_over_a_weekend_does_not_count_it(seeded_db):
+    result = _as("emp_001", submit_leave_request, date(2026, 11, 6), date(2026, 11, 9))
+
+    assert result["working_days"] == 2
+
+
+def test_a_request_can_start_today(seeded_db):
+    # the fixed test date is Tuesday 2026-09-22
+    result = _as("emp_001", submit_leave_request, GENERATED_AS_OF, GENERATED_AS_OF)
+
+    assert result["proposed"] is True
+    assert result["working_days"] == 1
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "reason"),
+    [
+        (date(2026, 11, 10), date(2026, 11, 9), "the end date is before the start date"),
+        (date(2026, 9, 21), date(2026, 9, 22), "the start date is in the past"),
+        (
+            date(2026, 11, 7),
+            date(2026, 11, 8),
+            "the range has no working days; it covers only a weekend",
+        ),
+    ],
+    ids=["end-before-start", "start-in-the-past", "no-working-days"],
+)
+def test_a_bad_range_is_refused_before_any_balance_check(seeded_db, start, end, reason):
+    result = _as("emp_001", submit_leave_request, start, end)
+
+    assert result == {"proposed": False, "reason": reason}
+    assert _count(seeded_db, "pending_actions") == 0
+
+
 def test_over_balance_is_refused_by_the_tool(seeded_db):
-    # emp_004 has 3.5 days left
-    result = _as("emp_004", submit_leave_request, date(2026, 11, 2), date(2026, 11, 11), 8)
+    # emp_004 has 3.5 days left and asks for 10 working days
+    result = _as("emp_004", submit_leave_request, date(2026, 11, 2), date(2026, 11, 13))
 
     assert result["proposed"] is False
+    assert result["requested_days"] == 10
     assert result["remaining_days"] == 3.5
     assert _count(seeded_db, "pending_actions") == 0
 
 
 def test_waiting_requests_are_subtracted_from_the_balance(seeded_db):
-    first = _as("emp_004", submit_leave_request, date(2026, 11, 2), date(2026, 11, 5), 3.5)
-    second = _as("emp_004", submit_leave_request, date(2026, 12, 1), date(2026, 12, 1), 1)
+    first = _as("emp_004", submit_leave_request, date(2026, 11, 2), date(2026, 11, 3))
+    second = _as("emp_004", submit_leave_request, date(2026, 11, 9), date(2026, 11, 10))
 
     assert first["proposed"] is True
     assert second["proposed"] is False
-    assert second["remaining_days"] == 0.0
+    assert second["remaining_days"] == 1.5
 
 
 def test_duplicate_leave_request_returns_the_same_id(seeded_db):
-    args = (date(2026, 11, 2), date(2026, 11, 6), 5)
+    args = (date(2026, 11, 2), date(2026, 11, 6))
     first = _as("emp_001", submit_leave_request, *args)
     second = _as("emp_001", submit_leave_request, *args)
 

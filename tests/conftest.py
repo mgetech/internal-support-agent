@@ -10,6 +10,7 @@ from pathlib import Path
 import psycopg
 import pytest
 from data.generate import (
+    GENERATED_AS_OF,
     generate_employees,
     generate_known_outages,
     generate_leave_balances,
@@ -17,6 +18,7 @@ from data.generate import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from support_agent import util
 from support_agent.tools import policy_search
 
 INIT_SQL = (Path(__file__).resolve().parent.parent / "db" / "init.sql").read_text()
@@ -39,6 +41,14 @@ class _DatabaseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     database_url: str | None = None
+
+
+@pytest.fixture(autouse=True)
+def fixed_today(monkeypatch):
+    """Every test runs on the date the data was generated for, so leave dates in the
+    tests never turn into dates in the past. A test can patch `util.get_today` again.
+    """
+    monkeypatch.setattr(util, "get_today", lambda: GENERATED_AS_OF)
 
 
 @pytest.fixture(scope="session")

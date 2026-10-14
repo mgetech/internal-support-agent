@@ -5,13 +5,13 @@ model can only ever see or act on the requester's own records.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Literal
 
 import psycopg
 from psycopg.types.json import Jsonb
 
-from support_agent import audit, db
+from support_agent import audit, db, util
 from support_agent.request_context import get_request_context
 from support_agent.tools.base import gated_write, record_tool_call
 
@@ -135,30 +135,36 @@ def _propose(cur: psycopg.Cursor, tool: str, payload: dict[str, Any]) -> int:
     return row["id"]
 
 
+def calculate_working_days(start_date: date, end_date: date) -> int:
+    """The number of Monday to Friday days from start_date to end_date, both included.
+    Public holidays are not taken out.
+    """
+    days = (end_date - start_date).days + 1
+    return sum(1 for n in range(days) if (start_date + timedelta(days=n)).weekday() < 5)
+
+
 @gated_write
-def submit_leave_request(start_date: date, end_date: date, working_days: float) -> str:
+def submit_leave_request(start_date: date, end_date: date) -> str:
     """Send the requester's vacation request to an approver. This does not book the
     vacation. An approver must approve it first.
 
-    working_days: the number of days off, without weekends. Example: Monday to Friday
-    is 5 working days.
+    The tool counts the working days itself: Monday to Friday, without weekends. Public
+    holidays are not taken out yet, so a public holiday in the range counts as a
+    working day.
 
-    The result has "proposed": true if the request was sent. If it has "proposed":
-    false, the request was not sent. Tell the requester the "reason" from the result.
-    If "already_sent" is true, the same request was sent before and is still waiting
-    for approval. No new request was made.
+    The result has "proposed": true if the request was sent. It then has "working_days",
+    the number of days that were requested. If it has "proposed": false, the request was
+    not sent. Tell the requester the "reason" from the result. If "already_sent" is
+    true, the same request was sent before and is still waiting for approval. No new
+    request was made.
     """
     get_request_context()
-    args = {
-        "start_date": start_date.isoformat(),
-        "end_date": end_date.isoformat(),
-        "working_days": working_days,
-    }
+    args = {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()}
     with db.transaction() as cur:
-        result = _submit_leave_request(cur, start_date, end_date, working_days)
+        result = _submit_leave_request(cur, start_date, end_date)
         if result["proposed"]:
             action = "already sent" if result["already_sent"] else "proposed"
-            summary = f"{action} {working_days} days, {args['start_date']} to {args['end_date']}"
+            summary = f"{action} {args['start_date']} to {args['end_date']}"
             ref = f"pending_actions:{result['action_id']}"
         else:
             summary = f"not proposed: {result['reason']}"
@@ -167,25 +173,24 @@ def submit_leave_request(start_date: date, end_date: date, working_days: float) 
     return json.dumps(result)
 
 
-def _submit_leave_request(
-    cur: psycopg.Cursor, start_date: date, end_date: date, working_days: float
-) -> dict[str, Any]:
+def _submit_leave_request(cur: psycopg.Cursor, start_date: date, end_date: date) -> dict[str, Any]:
     """The checks and the insert for submit_leave_request. Returns the tool's result."""
     ctx = get_request_context()
 
     if end_date < start_date:
         return {"proposed": False, "reason": "the end date is before the start date"}
+    if start_date < util.get_today():
+        return {"proposed": False, "reason": "the start date is in the past"}
     if end_date.year != start_date.year:
         return {
             "proposed": False,
             "reason": "a request cannot span two years; split it at the new year",
         }
-    calendar_days = (end_date - start_date).days + 1
-    if not 0 < working_days <= calendar_days:
+    working_days = calculate_working_days(start_date, end_date)
+    if working_days == 0:
         return {
             "proposed": False,
-            "reason": "working days must be more than 0 and no more than the days in the range",
-            "calendar_days": calendar_days,
+            "reason": "the range has no working days; it covers only a weekend",
         }
 
     year = start_date.year

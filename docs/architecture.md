@@ -103,6 +103,13 @@ to `pending_actions`. They do not book leave or open a ticket. A person with the
 role approves the row later, in a separate flow. Sending the same proposal twice returns
 the first one.
 
+**Leave days are counted in code.** `submit_leave_request` takes only a start and an end
+date. The tool counts the Monday to Friday days itself, and that number is used for the
+balance check and saved in the pending action, so the approver sees the figure that will
+be booked. It refuses an end date before the start, a start date in the past and a range
+with no working days, before it looks at the balance. Public holidays are not taken out
+yet.
+
 **Search.** `search_policies` joins two rankings with reciprocal rank fusion: vector
 similarity (pgvector, cosine) and Postgres full-text search. It returns the top five
 sections.
