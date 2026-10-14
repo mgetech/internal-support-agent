@@ -1,4 +1,4 @@
-.PHONY: setup lint format test db-up seed
+.PHONY: setup lint format test db-up seed ui
 
 VENV := .venv
 ifeq ($(OS),Windows_NT)
@@ -28,3 +28,6 @@ test:
 # generate, truncate, load — safe to re-run any time
 seed:
 	$(PYTHON) -m data.generate
+
+ui:
+	$(PYTHON) -m streamlit run ui/app.py
