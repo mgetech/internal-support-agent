@@ -51,7 +51,7 @@ instead of an answer. Every path ends in `finalize`.
 ## Status
 
 **Work in progress.** The agent and its REST API are built. The UI has a chat tab with a "Why this answer?" view
-under each reply, a "My requests" tab, an approval queue tab and a decision records tab, and the agent has not
+under each reply, a "My requests" tab, an approval queue tab, a decision records tab and thumbs feedback, and the agent has not
 run against a live model: the tests use a scripted one. What exists today:
 
 - **Synthetic data.** Employees, leave balances, outages and policies, from one

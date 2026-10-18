@@ -183,6 +183,28 @@ executed action.
 The graph is built on the first chat request and then reused. Tests replace it with a
 stub, so the API tests need no model keys.
 
+## UI
+
+`ui/app.py` is a Streamlit review surface, not a product. It calls the REST API with
+`httpx` and nothing else: it has no database access and imports nothing from the package.
+
+- **Tabs.** Chat, My requests, Approvals and Decision records. Only the open tab runs, so
+  the chat does not fetch the queue on every message.
+- **Employee selector.** It sets the `X-Employee-Id` header, so it is the login stub made
+  visible. The API has no route that lists employees, and a real deployment would have none
+  either, so the roster is a copy in the file. A test compares it with the seeded
+  `employees` table, so a seed change fails the test instead of drifting.
+- **Refusals are shown.** The approve and reject buttons are always on, and the tabs do not
+  hide what a role may not do. The API's 403 appears as an error, which is the demo of the
+  permission model.
+- **Why this answer?** Every reply has an expander. It reads the Decision Record when it
+  opens, not before. The Decision records tab uses the same view for a selected row.
+- **Notice.** A banner says that the user is talking to an AI and that a person is always
+  reachable. It names no contact, because the system has none. A reply that ended in
+  `escalate` or `propose_action` also says that a person takes over or decides.
+- **Feedback.** A thumb and an optional comment go to `POST /feedback/{request_id}`. The
+  API accepts several ratings for a request; the UI sends one per reply.
+
 ## The graph
 
 The graph is a LangGraph `StateGraph`. The state holds the messages, the classification,
@@ -355,6 +377,7 @@ and the version does not.
 - No test runs the real graph with the real database from start to end, and no test calls
   a live model.
 - Login is a header stub. Anyone who knows the header can act as any employee.
+- The only UI test checks the employee roster. The tabs have no automated tests.
 - Nothing calls the orphan check at startup.
 - Pending actions never expire. The `expired` status exists, but nothing sets it.
 - `GET /me/export` and `GET /usage` are not built.

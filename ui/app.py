@@ -107,6 +107,21 @@ def get_my_actions(employee_id: str) -> list[dict[str, Any]]:
     return response.json()
 
 
+def create_feedback(
+    employee_id: str, request_id: str, rating: str, comment: str | None
+) -> dict[str, Any]:
+    """Rate the answer to a request, as the employee who made it."""
+    body = {"rating": rating, **({"comment": comment} if comment else {})}
+    response = httpx.post(
+        f"{API_URL}/feedback/{request_id}",
+        json=body,
+        headers={"X-Employee-Id": employee_id},
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def create_approval(employee_id: str, action_id: int, decision: str) -> dict[str, Any]:
     """Approve or reject an action as the selected employee."""
     response = httpx.post(
@@ -156,6 +171,34 @@ def show_handoff_note(outcome: str) -> None:
     """Tell the employee when a person has to take over or decide."""
     if outcome in HANDOFF_NOTES:
         st.caption(f":material/support_agent: {HANDOFF_NOTES[outcome]}")
+
+
+def show_feedback(employee_id: str, item: dict[str, Any]) -> None:
+    """Thumbs up or down with an optional comment, once per reply."""
+    if "feedback" in item:
+        st.caption(f"Thanks, your {item['feedback']} vote was saved.")
+        return
+
+    request_id = item["request_id"]
+    with st.popover("Rate this answer", icon=":material/thumbs_up_down:"):
+        with st.form(f"feedback_{request_id}", border=False):
+            # the widget gives 0 for thumbs down and 1 for thumbs up
+            thumb = st.feedback("thumbs", key=f"thumb_{request_id}")
+            comment = st.text_input("Comment (optional)", max_chars=1000, key=f"note_{request_id}")
+            sent = st.form_submit_button("Send")
+        if not sent:
+            return
+        if thumb is None:
+            st.warning("Choose thumbs up or thumbs down first.")
+            return
+        rating = "up" if thumb == 1 else "down"
+        try:
+            create_feedback(employee_id, request_id, rating, comment.strip() or None)
+        except httpx.HTTPError as error:
+            st.error(get_error_message(error))
+            return
+    item["feedback"] = rating
+    st.rerun()
 
 
 def show_decision_record(record: dict[str, Any]) -> None:
@@ -217,6 +260,7 @@ def show_chat_tab(employee_id: str) -> None:
                 show_outcome_badge(item["outcome"])
                 show_handoff_note(item["outcome"])
                 show_why_expander(employee_id, item["request_id"])
+                show_feedback(employee_id, item)
 
     question = st.chat_input("Ask about HR or IT")
     if not question:
