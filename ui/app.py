@@ -39,6 +39,14 @@ OUTCOME_BADGES = {
     "refuse_with_citation": ("Refused", "red"),
 }
 
+ACTION_STATUS_BADGES = {
+    "pending_approval": ("Waiting for approval", "blue"),
+    "approved": ("Approved", "green"),
+    "executed": ("Approved and done", "green"),
+    "rejected": ("Rejected", "red"),
+    "expired": ("Expired", "gray"),
+}
+
 
 def get_error_message(error: httpx.HTTPError) -> str:
     """A short text for a failed API call."""
@@ -67,6 +75,17 @@ def get_approvals(employee_id: str) -> list[dict[str, Any]]:
     """The actions waiting for approval, as the selected employee."""
     response = httpx.get(
         f"{API_URL}/approvals",
+        headers={"X-Employee-Id": employee_id},
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def get_my_actions(employee_id: str) -> list[dict[str, Any]]:
+    """The selected employee's own actions, in any status."""
+    response = httpx.get(
+        f"{API_URL}/me/actions",
         headers={"X-Employee-Id": employee_id},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
@@ -205,6 +224,31 @@ def show_chat_tab(employee_id: str) -> None:
     st.rerun()
 
 
+def show_requests_tab(employee_id: str) -> None:
+    st.button("Refresh", icon=":material/refresh:", key="refresh_requests")
+
+    try:
+        actions = get_my_actions(employee_id)
+    except httpx.HTTPError as error:
+        st.error(get_error_message(error))
+        return
+    if not actions:
+        st.info("You have no requests yet. Ask the agent for leave or a ticket in the chat.")
+        return
+
+    for action in actions:
+        label, color = ACTION_STATUS_BADGES.get(action["status"], (action["status"], "gray"))
+        with st.container(border=True):
+            st.markdown(f"**#{action['id']} · {action['tool']}**")
+            st.badge(label, color=color)
+            st.caption(f"Requested at {format_time(action['created_at'])}")
+            if action["decided_by"]:
+                approver_name = EMPLOYEES.get(action["decided_by"], ("unknown",))[0]
+                decided_at = format_time(action["decided_at"])
+                st.caption(f"Decided by {approver_name} ({action['decided_by']}) at {decided_at}")
+            st.json(action["payload"])
+
+
 def show_approvals_tab(employee_id: str) -> None:
     # the result of the last decision, kept over the rerun that refreshes the list
     result = st.session_state.pop("approval_result", None)
@@ -329,12 +373,17 @@ def main() -> None:
         st.caption(f"API: {API_URL}")
 
     # only the open tab runs, so the chat does not fetch the queue on every message
-    chat_tab, approvals_tab, records_tab = st.tabs(
-        ["Chat", "Approvals", "Decision records"], key="active_tab", on_change="rerun"
+    chat_tab, requests_tab, approvals_tab, records_tab = st.tabs(
+        ["Chat", "My requests", "Approvals", "Decision records"],
+        key="active_tab",
+        on_change="rerun",
     )
     if chat_tab.open:
         with chat_tab:
             show_chat_tab(employee_id)
+    if requests_tab.open:
+        with requests_tab:
+            show_requests_tab(employee_id)
     if approvals_tab.open:
         with approvals_tab:
             show_approvals_tab(employee_id)
