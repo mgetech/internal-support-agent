@@ -47,6 +47,20 @@ ACTION_STATUS_BADGES = {
     "expired": ("Expired", "gray"),
 }
 
+# Shown above every tab. It does not name a contact: the system has no contact data.
+AI_NOTICE = (
+    "You are talking to an AI assistant, not a person. It can make mistakes, so check "
+    "important answers under 'Why this answer?'. A human is always reachable: you can "
+    "contact your HR or IT team directly at any time. Anything that changes data is "
+    "decided by a person."
+)
+
+HANDOFF_NOTES = {
+    "escalate": "The assistant cannot decide this. A person needs to handle it, so please "
+    "contact your HR or IT team directly.",
+    "propose_action": "A person decides on this request. You can follow it in 'My requests'.",
+}
+
 
 def get_error_message(error: httpx.HTTPError) -> str:
     """A short text for a failed API call."""
@@ -138,6 +152,12 @@ def show_outcome_badge(outcome: str) -> None:
     st.badge(label, color=color)
 
 
+def show_handoff_note(outcome: str) -> None:
+    """Tell the employee when a person has to take over or decide."""
+    if outcome in HANDOFF_NOTES:
+        st.caption(f":material/support_agent: {HANDOFF_NOTES[outcome]}")
+
+
 def show_decision_record(record: dict[str, Any]) -> None:
     """Why the agent did what it did: the summary, the cost, the citations, the versions
     and the evidence, all from the saved record.
@@ -195,6 +215,7 @@ def show_chat_tab(employee_id: str) -> None:
             st.write(item["content"])
             if item["role"] == "assistant":
                 show_outcome_badge(item["outcome"])
+                show_handoff_note(item["outcome"])
                 show_why_expander(employee_id, item["request_id"])
 
     question = st.chat_input("Ask about HR or IT")
@@ -363,6 +384,7 @@ def show_records_tab(employee_id: str) -> None:
 def main() -> None:
     st.set_page_config(page_title="Support agent", layout="wide")
     st.title("Support agent")
+    st.info(AI_NOTICE, icon=":material/smart_toy:")
 
     with st.sidebar:
         employee_id = st.selectbox(
