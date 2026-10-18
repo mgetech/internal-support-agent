@@ -32,6 +32,7 @@ from support_agent.guardrails.approval import (
 from support_agent.llm import get_llm_client
 from support_agent.request_context import bind_request_context
 from support_agent.state import Outcome, new_state
+from support_agent.tools.policy_search import get_policy_chunk
 
 app = FastAPI(title="Internal support agent")
 
@@ -70,6 +71,14 @@ class OwnAction(BaseModel):
     decided_by: str | None
     decided_at: datetime | None
     created_at: datetime
+
+
+class PolicyChunk(BaseModel):
+    id: str
+    policy: str
+    heading: str
+    content: str
+    policy_version: str
 
 
 class ApprovalRequest(BaseModel):
@@ -190,8 +199,9 @@ def get_decisions(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[DecisionRecordSummary]:
-    """The caller's own Decision Records, newest first. Only an HR partner can pass
-    another employee's id; anyone else gets a 403. The dates are inclusive.
+    """Decision Records, newest first: the caller's own, or another employee's with
+    `subject_employee_id`. Only an HR partner can; anyone else gets a 403. The dates are
+    inclusive.
     """
     try:
         return get_decision_records(
@@ -203,13 +213,26 @@ def get_decisions(
 
 @app.get("/decisions/{request_id}")
 def get_decision(
-    request_id: str, employee_id: Annotated[str, Depends(get_current_employee_id)]
+    request_id: str, reader_id: Annotated[str, Depends(get_current_employee_id)]
 ) -> DecisionRecord:
-    """The Decision Record of a request. The employee who made it, or an approver, can
-    read it. Anyone else gets a 404, the same as for a request that does not exist.
+    """The Decision Record of a request. Only an HR partner can read it; anyone else gets
+    a 403, whether or not the request exists.
     """
     try:
-        return get_decision_record(request_id, employee_id)
+        return get_decision_record(request_id, reader_id)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.get("/policy-chunks/{chunk_id}", dependencies=[Depends(get_current_employee_id)])
+def get_policy_chunk_by_id(chunk_id: str) -> PolicyChunk:
+    """The text of one policy section, so an employee can read what an answer cites. The
+    policies are the same for everyone. The id has a `#`, which a client sends as `%23`.
+    """
+    try:
+        return get_policy_chunk(chunk_id)
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 

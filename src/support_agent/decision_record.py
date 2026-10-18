@@ -15,12 +15,13 @@ from pydantic import BaseModel, ConfigDict
 
 from support_agent import audit, db
 from support_agent.costing import model_calls, request_total_cost
-from support_agent.guardrails.approval import APPROVER_ROLES
 from support_agent.request_context import Channel, bind_request_context, get_request_context
 from support_agent.state import AgentState, Outcome
 
-# The only role that may list another employee's records. The questions in a record can
-# be about health, so a manager sees only their own here.
+# The only role that may read Decision Records. A record holds the questions an employee
+# asked, which can be about health, and the technical detail of the model calls. An
+# employee gets their own data through the data export instead. A manager does not read
+# records either: they approve through the approval queue.
 HR_PARTNER_ROLE = "hr_partner"
 
 # the words for each `escalation` evidence reason, used in the summary sentence
@@ -179,12 +180,30 @@ def save_decision_record(record: DecisionRecord) -> None:
         )
 
 
-def get_decision_record(request_id: str, reader_id: str) -> DecisionRecord:
-    """Read one record back. The employee who made the request may read it, and so may
-    an approver. Raises LookupError if there is no such record, or if the reader may not
-    read it: the two cases look the same, so a request id cannot be used to find out
-    what exists.
+def validate_hr_partner(employee_id: str) -> None:
+    """Raise PermissionError if the employee is not an HR partner."""
+    employee = db.fetch_one("SELECT role FROM employees WHERE id = %s", (employee_id,))
+    if employee is None or employee["role"] != HR_PARTNER_ROLE:
+        raise PermissionError("only an HR partner can read Decision Records")
+
+
+def _audit_view(viewer_id: str, payload: dict[str, Any]) -> None:
+    """Save a `decision_records_viewed` event. A read has no request of its own, so the
+    event gets a new request id.
     """
+    with bind_request_context(viewer_id, uuid.uuid4().hex, "rest"):
+        audit.record("decision_records_viewed", payload, actor="approver")
+
+
+def get_decision_record(request_id: str, reader_id: str) -> DecisionRecord:
+    """Read one record back. Only an HR partner can. Raises PermissionError for anyone
+    else, before the record is looked up, so the answer does not say which ids exist.
+    Raises LookupError if there is no such record.
+
+    When the record belongs to another employee, a `decision_records_viewed` audit event
+    is saved first, so the record is not returned without one.
+    """
+    validate_hr_partner(reader_id)
     row = db.fetch_one(
         """
         SELECT request_id, employee_id, channel, outcome, summary, evidence, citations,
@@ -192,15 +211,15 @@ def get_decision_record(request_id: str, reader_id: str) -> DecisionRecord:
                total_cost_eur, latency_ms, trace_id
         FROM decision_records
         WHERE request_id = %s
-          AND (
-              employee_id = %s
-              OR EXISTS (SELECT 1 FROM employees WHERE id = %s AND role = ANY(%s))
-          )
         """,
-        (request_id, reader_id, reader_id, list(APPROVER_ROLES)),
+        (request_id,),
     )
     if row is None:
         raise LookupError(f"no decision record {request_id}")
+    if row["employee_id"] != reader_id:
+        _audit_view(
+            reader_id, {"subject_employee_id": row["employee_id"], "request_id": request_id}
+        )
     return DecisionRecord(**row)
 
 
@@ -216,17 +235,12 @@ def get_decision_records(
     """List the records of one employee, newest first. Without `subject_id` these are the
     caller's own. The dates are inclusive.
 
-    Raises PermissionError if the subject is another employee and the caller is not an HR
-    partner. When an HR partner lists another employee's records, a
-    `decision_records_viewed` audit event is saved first, so no rows are returned without
-    one.
+    Raises PermissionError if the caller is not an HR partner. When the subject is another
+    employee, a `decision_records_viewed` audit event is saved first, so no rows are
+    returned without one.
     """
+    validate_hr_partner(caller_id)
     subject_id = subject_id or caller_id
-    is_other_employee = subject_id != caller_id
-    if is_other_employee:
-        caller = db.fetch_one("SELECT role FROM employees WHERE id = %s", (caller_id,))
-        if caller is None or caller["role"] != HR_PARTNER_ROLE:
-            raise PermissionError("only an HR partner can view another employee's records")
 
     rows = db.fetch_all(
         """
@@ -243,18 +257,15 @@ def get_decision_records(
         (subject_id, outcome, outcome, from_date, from_date, to_date, to_date, limit, offset),
     )
 
-    if is_other_employee:
-        # a list has no request of its own, so it gets a new request id for the audit log
-        with bind_request_context(caller_id, uuid.uuid4().hex, "rest"):
-            audit.record(
-                "decision_records_viewed",
-                {
-                    "subject_employee_id": subject_id,
-                    "outcome": outcome,
-                    "from_date": from_date.isoformat() if from_date else None,
-                    "to_date": to_date.isoformat() if to_date else None,
-                    "returned": len(rows),
-                },
-                actor="approver",
-            )
+    if subject_id != caller_id:
+        _audit_view(
+            caller_id,
+            {
+                "subject_employee_id": subject_id,
+                "outcome": outcome,
+                "from_date": from_date.isoformat() if from_date else None,
+                "to_date": to_date.isoformat() if to_date else None,
+                "returned": len(rows),
+            },
+        )
     return [DecisionRecordSummary(**row) for row in rows]

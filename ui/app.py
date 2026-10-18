@@ -5,8 +5,10 @@ selector is the login stub made visible: it sets the X-Employee-Id header.
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import streamlit as st
@@ -47,12 +49,18 @@ ACTION_STATUS_BADGES = {
     "expired": ("Expired", "gray"),
 }
 
+# Only an HR partner can read Decision Records, so only they get 'Why this answer?'.
+HR_PARTNER_ROLE = "hr_partner"
+
+# the same pattern as the citation check in guardrails/verifier.py
+CITATION_PATTERN = re.compile(r"\[chunk:([^\]\s]+)\]")
+
 # Shown above every tab. It does not name a contact: the system has no contact data.
 AI_NOTICE = (
-    "You are talking to an AI assistant, not a person. It can make mistakes, so check "
-    "important answers under 'Why this answer?'. A human is always reachable: you can "
-    "contact your HR or IT team directly at any time. Anything that changes data is "
-    "decided by a person."
+    "You are talking to an AI assistant, not a person. It can make mistakes, so open the "
+    "numbered sources in an answer and check important answers with your HR or IT team. "
+    "A human is always reachable: you can contact your HR or IT team directly at any time. "
+    "Anything that changes data is decided by a person."
 )
 
 HANDOFF_NOTES = {
@@ -100,6 +108,18 @@ def get_my_actions(employee_id: str) -> list[dict[str, Any]]:
     """The selected employee's own actions, in any status."""
     response = httpx.get(
         f"{API_URL}/me/actions",
+        headers={"X-Employee-Id": employee_id},
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+@st.cache_data(ttl=600, max_entries=200, show_spinner=False)
+def get_policy_chunk(employee_id: str, chunk_id: str) -> dict[str, Any]:
+    """One policy section by its chunk id. The id has a '#', so it is encoded for the path."""
+    response = httpx.get(
+        f"{API_URL}/policy-chunks/{quote(chunk_id, safe='')}",
         headers={"X-Employee-Id": employee_id},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
@@ -165,6 +185,30 @@ def format_time(timestamp: str) -> str:
 def show_outcome_badge(outcome: str) -> None:
     label, color = OUTCOME_BADGES.get(outcome, (outcome, "gray"))
     st.badge(label, color=color)
+
+
+def show_answer(employee_id: str, text: str) -> None:
+    """The answer, with each [chunk:<id>] turned into a number. Each number has a button
+    under the answer that opens the text of that policy section.
+    """
+    chunk_ids = list(dict.fromkeys(CITATION_PATTERN.findall(text)))
+    numbers = {chunk_id: number for number, chunk_id in enumerate(chunk_ids, start=1)}
+    st.write(CITATION_PATTERN.sub(lambda match: f"**[{numbers[match[1]]}]**", text))
+
+    if not chunk_ids:
+        return
+    with st.container(horizontal=True):
+        for chunk_id, number in numbers.items():
+            try:
+                chunk = get_policy_chunk(employee_id, chunk_id)
+            except httpx.HTTPError as error:
+                with st.popover(f"[{number}] {chunk_id}"):
+                    st.error(get_error_message(error))
+                continue
+            with st.popover(f"[{number}] {chunk['policy']} · {chunk['heading']}"):
+                st.markdown(f"**{chunk['heading']}**")
+                st.markdown(chunk["content"])
+                st.caption(f"{chunk['id']} · policy version {chunk['policy_version']}")
 
 
 def show_handoff_note(outcome: str) -> None:
@@ -255,12 +299,15 @@ def show_chat_tab(employee_id: str) -> None:
 
     for item in history:
         with st.chat_message(item["role"]):
-            st.write(item["content"])
-            if item["role"] == "assistant":
-                show_outcome_badge(item["outcome"])
-                show_handoff_note(item["outcome"])
+            if item["role"] == "user":
+                st.write(item["content"])
+                continue
+            show_answer(employee_id, item["content"])
+            show_outcome_badge(item["outcome"])
+            show_handoff_note(item["outcome"])
+            if EMPLOYEES[employee_id][1] == HR_PARTNER_ROLE:
                 show_why_expander(employee_id, item["request_id"])
-                show_feedback(employee_id, item)
+            show_feedback(employee_id, item)
 
     question = st.chat_input("Ask about HR or IT")
     if not question:
@@ -365,8 +412,9 @@ def show_approvals_tab(employee_id: str) -> None:
 
 def show_records_tab(employee_id: str) -> None:
     st.caption(
-        "You see your own records. An HR partner can pick another employee; the API refuses "
-        "everyone else, and every look at another employee's records is audited."
+        "Only an HR partner can read Decision Records; the API refuses everyone else. An HR "
+        "partner can pick another employee, and every look at another employee's records is "
+        "audited."
     )
     employee_ids = list(EMPLOYEES)
     with st.container(horizontal=True, vertical_alignment="bottom"):

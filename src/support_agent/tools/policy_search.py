@@ -45,6 +45,23 @@ def get_policy_version() -> str | None:
     return ", ".join(row["policy_version"] for row in rows) or None
 
 
+def get_policy_chunk(chunk_id: str) -> dict[str, str]:
+    """One policy section by its chunk id, as the answer cites it. Raises LookupError if
+    there is no such chunk.
+    """
+    row = db.fetch_one(
+        """
+        SELECT id, policy, heading, content, policy_version
+        FROM policy_chunks
+        WHERE id = %s AND chunker = 'structural'
+        """,
+        (chunk_id,),
+    )
+    if row is None:
+        raise LookupError(f"no policy chunk {chunk_id}")
+    return row
+
+
 def search_policies(query: str) -> str:
     """Search the HR and IT policies and return the 5 most relevant passages, each with
     its chunk id. Any claim you make from a passage must cite it as [chunk:<id>], using

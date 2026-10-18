@@ -50,8 +50,8 @@ instead of an answer. Every path ends in `finalize`.
 
 ## Status
 
-**Work in progress.** The agent and its REST API are built. The UI has a chat tab with a "Why this answer?" view
-under each reply, a "My requests" tab, an approval queue tab, a decision records tab and thumbs feedback, and the agent has not
+**Work in progress.** The agent and its REST API are built. The UI has a chat tab with numbered policy sources under each answer and, for HR
+partners, a "Why this answer?" view, a "My requests" tab, an approval queue tab, a decision records tab and thumbs feedback, and the agent has not
 run against a live model: the tests use a scripted one. What exists today:
 
 - **Synthetic data.** Employees, leave balances, outages and policies, from one
@@ -132,8 +132,9 @@ Rough build order:
 | `POST /chat` | runs the agent for one message and returns the answer, the outcome and the request id | Built |
 | `GET /approvals` | the actions waiting for approval, with their payload. Approvers only | Built |
 | `POST /approvals/{id}` | approves or rejects an action. Approvers only, never their own request | Built |
-| `GET /decisions` | your Decision Records as a list, newest first, filtered by outcome and date. An HR partner can also list another employee's | Built |
-| `GET /decisions/{request_id}` | the Decision Record of a request: why the agent did what it did | Built |
+| `GET /decisions` | Decision Records as a list, newest first, filtered by outcome and date. HR partners only; they can list another employee's too | Built |
+| `GET /decisions/{request_id}` | the Decision Record of a request: why the agent did what it did. HR partners only | Built |
+| `GET /policy-chunks/{chunk_id}` | the text of one policy section, as an answer cites it | Built |
 | `POST /feedback/{request_id}` | a rating and an optional comment on an answer | Built |
 | `GET /me/actions` | your own actions in any status, with who decided and when | Built |
 | `GET /me/export` | everything the system holds about the employee | Planned |

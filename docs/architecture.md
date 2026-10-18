@@ -167,16 +167,17 @@ executed action.
 | `POST /chat` | runs the agent for one message and returns the answer, the outcome and the request id |
 | `GET /approvals` | the actions waiting for approval, with their payload. Approvers only |
 | `POST /approvals/{id}` | approves or rejects an action. The approver is the employee in the header |
-| `GET /decisions` | a summary of the caller's Decision Records, newest first. Filters: `outcome`, `from_date`, `to_date` (inclusive), `subject_employee_id`. Paged with `limit` (default 50, at most 200) and `offset` |
-| `GET /decisions/{request_id}` | the Decision Record. The employee who made the request, or an approver, can read it |
+| `GET /decisions` | HR partners only. A summary of Decision Records, newest first. Filters: `outcome`, `from_date`, `to_date` (inclusive), `subject_employee_id`. Paged with `limit` (default 50, at most 200) and `offset` |
+| `GET /decisions/{request_id}` | the full Decision Record. HR partners only |
+| `GET /policy-chunks/{chunk_id}` | the text of one policy section, as an answer cites it. Any employee. The `#` in the id is sent as `%23` |
 | `POST /feedback/{request_id}` | a rating (`up` or `down`) and an optional comment. Only the employee who made the request can send it |
 | `GET /me/actions` | the caller's own actions in any status, newest first, with `decided_by` and `decided_at`. Paged with `limit` (default 50, at most 200) and `offset` |
 
 | Status | When |
 |---|---|
 | 401 | the header is missing, or the employee is unknown |
-| 403 | the employee may not do this: not an approver, approving their own request, or listing another employee's Decision Records without being an HR partner |
-| 404 | the action or record does not exist. A record that the employee may not read gives the same answer |
+| 403 | the employee may not do this: not an approver, approving their own request, or reading Decision Records without being an HR partner. A manager is not one |
+| 404 | the action, record or policy section does not exist. A reader who is not an HR partner gets a 403 for every record id, so the answer does not say which ids exist |
 | 409 | the action was already decided |
 | 422 | the body is not valid. Extra fields are refused, so a body cannot carry an employee id |
 
@@ -197,8 +198,15 @@ stub, so the API tests need no model keys.
 - **Refusals are shown.** The approve and reject buttons are always on, and the tabs do not
   hide what a role may not do. The API's 403 appears as an error, which is the demo of the
   permission model.
-- **Why this answer?** Every reply has an expander. It reads the Decision Record when it
-  opens, not before. The Decision records tab uses the same view for a selected row.
+- **Why this answer?** Only an HR partner can read Decision Records, so only they get
+  this expander under a reply. It reads the record when it opens, not before. The
+  Decision records tab uses the same view for a selected row, and shows the API's 403 to
+  everyone else.
+- **Sources.** Each `[chunk:<id>]` in an answer becomes a number, and a button under the
+  answer opens the text of that policy section through `GET /policy-chunks/{chunk_id}`.
+  Everyone gets this, because the policies are the same for every employee. It is a
+  button and not a link in the text, because a link opened by the browser cannot send
+  the login header.
 - **Notice.** A banner says that the user is talking to an AI and that a person is always
   reachable. It names no contact, because the system has none. A reply that ended in
   `escalate` or `propose_action` also says that a person takes over or decides.
@@ -279,18 +287,23 @@ Every request that reaches the end of the graph saves one row in `decision_recor
 The record and the final `decision_recorded` audit event are saved in one transaction.
 The request id is unique, so a request can have only one record.
 
-**Listing.** `GET /decisions` returns a summary of each record (outcome, one sentence,
-time, tokens and cost) and no evidence. An employee sees their own records. Only an
-`hr_partner` can pass `subject_employee_id` for someone else; an employee or a manager who
-does gets a 403. A manager is held to this because the questions in a record can be about
-health, so browsing other people's records is limited to HR. Managers still approve through
-`/approvals`. When an HR partner lists another employee's records, a
-`decision_records_viewed` audit event is saved before the rows are returned. Its actor is
-`approver:<id>` and its payload has the subject, the filters and the number of rows. A list
-has no request of its own, so the event gets a new request id.
+**Who can read records.** Only an `hr_partner`, on both `GET /decisions` and
+`GET /decisions/{request_id}`. Everyone else, managers and the employee who made the
+request included, gets a 403. A record holds the questions an employee asked, which can
+be about health, and the technical detail of the model calls (models, tokens, cost,
+versions, raw evidence). That is for reviewers, so it is limited to HR. An employee will
+get their own data through the data export. A manager decides actions through
+`/approvals` and does not need the records. The role is checked before the record is
+looked up, so a refusal does not say which request ids exist. Feedback is not affected:
+posting it does not read the record.
 
-`GET /decisions/{request_id}` is unchanged: an approver, a manager too, can still read one
-record by its id.
+**Listing.** `GET /decisions` returns a summary of each record (outcome, one sentence,
+time, tokens and cost) and no evidence. Without `subject_employee_id` the HR partner
+gets their own records. When an HR partner reads another employee's records, one at a
+time or as a list, a `decision_records_viewed` audit event is saved before anything is
+returned. Its actor is `approver:<id>`, and its payload has the subject and either the
+request id or the filters and the number of rows. A read has no request of its own, so
+the event gets a new request id.
 
 **Policy version.** Each policy section is stored with the version from its policy file's
 frontmatter. A record names the version that the database holds, not the version of the
