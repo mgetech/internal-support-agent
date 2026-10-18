@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
+from fastapi import FastAPI, Header
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 from tests.graph_helpers import CLASSIFIED, ScriptedLLM, call_reply, run_graph, text_reply
@@ -80,21 +81,58 @@ def _body_schemas(spec: dict[str, Any]) -> list[Any]:
     ]
 
 
-def test_no_route_takes_an_employee_id_except_the_header():
-    spec = app.openapi()
-    parameters = [
-        p
-        for path in spec["paths"].values()
-        for op in path.values()
-        for p in op.get("parameters", [])
-    ]
+# The one route parameter that may name an employee. It is a filter that the service checks
+# against the caller's role (an HR partner only), not the identity of the caller.
+ALLOWED_IDENTITY_PARAMETERS = {("GET", "/decisions", "subject_employee_id")}
 
-    header_names = {p["name"].lower() for p in parameters if p["in"] == "header"}
-    other_names = [p["name"] for p in parameters if p["in"] != "header"]
+
+def find_identity_parameters(spec: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """(method, path, name) of every header or query parameter that could name an employee,
+    except the login header and the allowed filters.
+    """
+    found = []
+    for path, operations in spec["paths"].items():
+        for method, operation in operations.items():
+            for parameter in operation.get("parameters", []):
+                name = parameter["name"]
+                if not is_identity_field(name):
+                    continue
+                if parameter["in"] == "header" and name.lower() == "x-employee-id":
+                    continue
+                if (method.upper(), path, name) in ALLOWED_IDENTITY_PARAMETERS:
+                    continue
+                found.append((method.upper(), path, name))
+    return found
+
+
+def test_no_route_takes_an_employee_id_except_the_header_and_the_allowed_filter():
+    spec = app.openapi()
     body_names = [name for schema in _body_schemas(spec) for name in property_names(schema)]
 
-    assert {n for n in header_names if is_identity_field(n)} <= {"x-employee-id"}
-    assert [n for n in other_names + body_names if is_identity_field(n)] == []
+    assert find_identity_parameters(spec) == []
+    assert [n for n in body_names if is_identity_field(n)] == []
+
+
+def test_the_allowed_filter_is_the_only_one_that_passes():
+    other = FastAPI()
+
+    @other.get("/decisions")
+    def list_decisions(subject_employee_id: str | None = None) -> list[str]:
+        return []
+
+    @other.get("/reports")
+    def list_reports(subject_employee_id: str | None = None, employee_id: str | None = None):
+        return []
+
+    @other.post("/notes")
+    def create_note(user_id: Annotated[str, Header()]):
+        return {}
+
+    assert find_identity_parameters(other.openapi()) == [
+        ("GET", "/reports", "subject_employee_id"),
+        ("GET", "/reports", "employee_id"),
+        ("POST", "/notes", "user-id"),
+    ]
 
 
 # INTEGRATION TESTS: the tests below use the real Postgres (make db-up).
@@ -384,6 +422,153 @@ def test_another_employee_cannot_read_the_record(client, seeded_db):
 
 def test_an_unknown_request_is_not_found(client, seeded_db):
     assert client.get("/decisions/req-999", headers=CHAT_HEADERS).status_code == 404
+
+
+def _insert_record(
+    conn, request_id: str, employee_id: str, outcome: str = "resolve", day: date = date(2026, 9, 22)
+) -> None:
+    """Insert a minimal Decision Record that was created at noon on the given day."""
+    conn.execute(
+        """
+        INSERT INTO decision_records (request_id, employee_id, channel, outcome, summary,
+                                      evidence, created_at)
+        VALUES (%s, %s, 'rest', %s, %s, '[{"type": "classification"}]', %s::date + time '12:00')
+        """,
+        (request_id, employee_id, outcome, f"Summary of {request_id}.", day),
+    )
+
+
+def _list_ids(client, caller: str, **query) -> list[str]:
+    response = client.get("/decisions", params=query, headers=_approver(caller))
+    assert response.status_code == 200
+    return [item["request_id"] for item in response.json()]
+
+
+def _viewed_events(conn) -> list[tuple[str, dict[str, Any]]]:
+    return conn.execute(
+        "SELECT actor, payload FROM audit_log WHERE event = 'decision_records_viewed'"
+    ).fetchall()
+
+
+def test_the_record_list_without_the_header_is_unauthorized(client):
+    assert client.get("/decisions").status_code == 401
+
+
+def test_an_employee_lists_only_their_own_records_newest_first(client, seeded_db):
+    _insert_record(seeded_db, "req-old", "emp_001", day=date(2026, 9, 1))
+    _insert_record(seeded_db, "req-new", "emp_001", day=date(2026, 9, 20))
+    _insert_record(seeded_db, "req-other", "emp_002")
+
+    response = client.get("/decisions", headers=CHAT_HEADERS)
+
+    assert response.status_code == 200
+    items = response.json()
+    assert [item["request_id"] for item in items] == ["req-new", "req-old"]
+    assert {item["employee_id"] for item in items} == {"emp_001"}
+    # the list is a summary: the evidence is read through /decisions/{request_id}
+    assert set(items[0]) == {
+        "request_id",
+        "employee_id",
+        "outcome",
+        "summary",
+        "created_at",
+        "total_tokens",
+        "total_cost_eur",
+    }
+    assert _viewed_events(seeded_db) == []
+
+
+def test_an_employee_can_name_themselves_as_the_subject(client, seeded_db):
+    _insert_record(seeded_db, "req-1", "emp_001")
+
+    assert _list_ids(client, "emp_001", subject_employee_id="emp_001") == ["req-1"]
+    assert _viewed_events(seeded_db) == []
+
+
+@pytest.mark.parametrize("caller", ["emp_001", "emp_010"], ids=["employee", "manager"])
+def test_only_an_hr_partner_can_list_another_employees_records(caller, client, seeded_db):
+    _insert_record(seeded_db, "req-1", "emp_002")
+
+    response = client.get(
+        "/decisions", params={"subject_employee_id": "emp_002"}, headers=_approver(caller)
+    )
+
+    assert response.status_code == 403
+    assert _viewed_events(seeded_db) == []
+
+
+def test_a_manager_lists_only_their_own_records(client, seeded_db):
+    _insert_record(seeded_db, "req-manager", "emp_010")
+    _insert_record(seeded_db, "req-employee", "emp_001")
+
+    assert _list_ids(client, "emp_010") == ["req-manager"]
+
+
+def test_an_hr_partner_lists_another_employees_records_and_it_is_audited(client, seeded_db):
+    _insert_record(seeded_db, "req-1", "emp_002", outcome="escalate")
+    _insert_record(seeded_db, "req-2", "emp_001")
+
+    ids = _list_ids(
+        client, "emp_005", subject_employee_id="emp_002", outcome="escalate", from_date="2026-09-01"
+    )
+
+    assert ids == ["req-1"]
+    assert _viewed_events(seeded_db) == [
+        (
+            "approver:emp_005",
+            {
+                "subject_employee_id": "emp_002",
+                "outcome": "escalate",
+                "from_date": "2026-09-01",
+                "to_date": None,
+                "returned": 1,
+            },
+        )
+    ]
+
+
+def test_an_hr_partner_without_a_subject_lists_their_own_records(client, seeded_db):
+    _insert_record(seeded_db, "req-hr", "emp_005")
+    _insert_record(seeded_db, "req-employee", "emp_001")
+
+    assert _list_ids(client, "emp_005") == ["req-hr"]
+    assert _viewed_events(seeded_db) == []
+
+
+def test_the_list_filters_by_outcome(client, seeded_db):
+    _insert_record(seeded_db, "req-resolve", "emp_001", outcome="resolve")
+    _insert_record(seeded_db, "req-propose", "emp_001", outcome="propose_action")
+    _insert_record(seeded_db, "req-escalate", "emp_001", outcome="escalate")
+
+    assert _list_ids(client, "emp_001", outcome="propose_action") == ["req-propose"]
+    assert sorted(_list_ids(client, "emp_001")) == ["req-escalate", "req-propose", "req-resolve"]
+
+
+def test_the_list_filters_by_an_inclusive_date_range(client, seeded_db):
+    for request_id, day in [("req-1", 1), ("req-2", 10), ("req-3", 20)]:
+        _insert_record(seeded_db, request_id, "emp_001", day=date(2026, 9, day))
+
+    assert _list_ids(client, "emp_001", from_date="2026-09-10", to_date="2026-09-10") == ["req-2"]
+    assert _list_ids(client, "emp_001", from_date="2026-09-10") == ["req-3", "req-2"]
+    assert _list_ids(client, "emp_001", to_date="2026-09-10") == ["req-2", "req-1"]
+
+
+def test_the_list_is_paged_with_a_default_limit_of_50(client, seeded_db):
+    for number in range(51):
+        _insert_record(seeded_db, f"req-{number:02}", "emp_001")
+
+    assert len(_list_ids(client, "emp_001")) == 50
+    assert _list_ids(client, "emp_001", limit=2, offset=50) == ["req-50"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [{"limit": 0}, {"limit": 201}, {"offset": -1}, {"outcome": "maybe"}, {"from_date": "soon"}],
+)
+def test_a_bad_list_filter_is_refused(query, client, seeded_db):
+    response = client.get("/decisions", params=query, headers=CHAT_HEADERS)
+
+    assert response.status_code == 422
 
 
 def test_feedback_is_saved_with_a_rating_and_a_comment(client, seeded_db):

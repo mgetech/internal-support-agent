@@ -131,13 +131,15 @@ Rough build order:
 | `POST /chat` | runs the agent for one message and returns the answer, the outcome and the request id | Built |
 | `GET /approvals` | the actions waiting for approval, with their payload. Approvers only | Built |
 | `POST /approvals/{id}` | approves or rejects an action. Approvers only, never their own request | Built |
+| `GET /decisions` | your Decision Records as a list, newest first, filtered by outcome and date. An HR partner can also list another employee's | Built |
 | `GET /decisions/{request_id}` | the Decision Record of a request: why the agent did what it did | Built |
 | `POST /feedback/{request_id}` | a rating and an optional comment on an answer | Built |
 | `GET /me/export` | everything the system holds about the employee | Planned |
 | `GET /usage` | requests, tokens and cost in euros per day and employee | Planned |
 
-The employee comes from the `X-Employee-Id` header, which is a login stub for now. No route
-takes an employee id in the path, the query or the body.
+The employee comes from the `X-Employee-Id` header, which is a login stub for now. No
+model-visible tool accepts an employee identifier; the caller's identity comes only from the
+authenticated request.
 
 ## License
 

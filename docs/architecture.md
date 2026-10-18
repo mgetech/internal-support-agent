@@ -83,8 +83,13 @@ for every tool schema, and another test checks that no tool runs without a bound
 Over REST, the employee comes from the `X-Employee-Id` header. This is a login stub: the
 header is trusted, and the only check is that the employee exists. It is the one place
 where identity enters, so real login (OIDC) would change only that function. No route
-takes an employee id in the path, the query or the body, and a test checks this for every
-route.
+takes an employee id in the path or the body, and a test checks this for every route.
+
+The one employee id in a query is `subject_employee_id` on `GET /decisions`. It does not
+say who the caller is. It says whose records to list, and the service checks it against the
+caller's role (see [Decision Records](#decision-records)). The test has an explicit
+allowlist with only this parameter, so any other identity-like parameter on any route
+still fails it.
 
 ## Tools
 
@@ -159,13 +164,14 @@ executed action.
 | `POST /chat` | runs the agent for one message and returns the answer, the outcome and the request id |
 | `GET /approvals` | the actions waiting for approval, with their payload. Approvers only |
 | `POST /approvals/{id}` | approves or rejects an action. The approver is the employee in the header |
+| `GET /decisions` | a summary of the caller's Decision Records, newest first. Filters: `outcome`, `from_date`, `to_date` (inclusive), `subject_employee_id`. Paged with `limit` (default 50, at most 200) and `offset` |
 | `GET /decisions/{request_id}` | the Decision Record. The employee who made the request, or an approver, can read it |
 | `POST /feedback/{request_id}` | a rating (`up` or `down`) and an optional comment. Only the employee who made the request can send it |
 
 | Status | When |
 |---|---|
 | 401 | the header is missing, or the employee is unknown |
-| 403 | the employee may not do this: not an approver, or approving their own request |
+| 403 | the employee may not do this: not an approver, approving their own request, or listing another employee's Decision Records without being an HR partner |
 | 404 | the action or record does not exist. A record that the employee may not read gives the same answer |
 | 409 | the action was already decided |
 | 422 | the body is not valid. Extra fields are refused, so a body cannot carry an employee id |
@@ -247,6 +253,19 @@ Every request that reaches the end of the graph saves one row in `decision_recor
 The record and the final `decision_recorded` audit event are saved in one transaction.
 The request id is unique, so a request can have only one record.
 
+**Listing.** `GET /decisions` returns a summary of each record (outcome, one sentence,
+time, tokens and cost) and no evidence. An employee sees their own records. Only an
+`hr_partner` can pass `subject_employee_id` for someone else; an employee or a manager who
+does gets a 403. A manager is held to this because the questions in a record can be about
+health, so browsing other people's records is limited to HR. Managers still approve through
+`/approvals`. When an HR partner lists another employee's records, a
+`decision_records_viewed` audit event is saved before the rows are returned. Its actor is
+`approver:<id>` and its payload has the subject, the filters and the number of rows. A list
+has no request of its own, so the event gets a new request id.
+
+`GET /decisions/{request_id}` is unchanged: an approver, a manager too, can still read one
+record by its id.
+
 **Policy version.** Each policy section is stored with the version from its policy file's
 frontmatter. A record names the version that the database holds, not the version of the
 files on disk. If sections of several versions are stored, the record names all of them.
@@ -275,6 +294,7 @@ and a later check cost less. Nothing calls the check at startup yet.
 
 `audit_log` is append-only. Every tool call, proposal, approval, rejection, execution,
 feedback, model call and decision is written with the request id and the actor: `agent`, `employee:<id>`, `approver:<id>` or `system`.
+So is every time an HR partner lists another employee's Decision Records.
 The request id and the employee come from the request context, never from an argument.
 
 ## Model client and cost
@@ -317,7 +337,8 @@ and the version does not.
   row in `leave_requests` or `tickets` exists without an executed action.
 - **Security tests** run for every tool: no identity argument, no run without a bound
   request, and write tools only add to the approval queue. A test also checks that no
-  route takes an employee id, except through the header.
+  route takes an employee id, except through the header and the allowed `GET /decisions`
+  filter.
 
 ## Known limits
 

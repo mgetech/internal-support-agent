@@ -6,6 +6,8 @@ transaction. The record does not depend on the trace; it is the system of record
 from __future__ import annotations
 
 import time
+import uuid
+from datetime import date, datetime
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -14,8 +16,12 @@ from pydantic import BaseModel, ConfigDict
 from support_agent import audit, db
 from support_agent.costing import model_calls, request_total_cost
 from support_agent.guardrails.approval import APPROVER_ROLES
-from support_agent.request_context import Channel, get_request_context
+from support_agent.request_context import Channel, bind_request_context, get_request_context
 from support_agent.state import AgentState, Outcome
+
+# The only role that may list another employee's records. The questions in a record can
+# be about health, so a manager sees only their own here.
+HR_PARTNER_ROLE = "hr_partner"
 
 # the words for each `escalation` evidence reason, used in the summary sentence
 ESCALATION_REASONS = {
@@ -48,6 +54,20 @@ class DecisionRecord(BaseModel):
     total_cost_eur: float
     latency_ms: int
     trace_id: str | None
+
+
+class DecisionRecordSummary(BaseModel):
+    """One row of the record list. It has no evidence: the full record is read by id."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    request_id: str
+    employee_id: str
+    outcome: Outcome
+    summary: str
+    created_at: datetime
+    total_tokens: int
+    total_cost_eur: float
 
 
 def summarize(
@@ -182,3 +202,59 @@ def get_decision_record(request_id: str, reader_id: str) -> DecisionRecord:
     if row is None:
         raise LookupError(f"no decision record {request_id}")
     return DecisionRecord(**row)
+
+
+def get_decision_records(
+    caller_id: str,
+    subject_id: str | None = None,
+    outcome: Outcome | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[DecisionRecordSummary]:
+    """List the records of one employee, newest first. Without `subject_id` these are the
+    caller's own. The dates are inclusive.
+
+    Raises PermissionError if the subject is another employee and the caller is not an HR
+    partner. When an HR partner lists another employee's records, a
+    `decision_records_viewed` audit event is saved first, so no rows are returned without
+    one.
+    """
+    subject_id = subject_id or caller_id
+    is_other_employee = subject_id != caller_id
+    if is_other_employee:
+        caller = db.fetch_one("SELECT role FROM employees WHERE id = %s", (caller_id,))
+        if caller is None or caller["role"] != HR_PARTNER_ROLE:
+            raise PermissionError("only an HR partner can view another employee's records")
+
+    rows = db.fetch_all(
+        """
+        SELECT request_id, employee_id, outcome, summary, created_at, total_tokens,
+               total_cost_eur
+        FROM decision_records
+        WHERE employee_id = %s
+          AND (%s::text IS NULL OR outcome = %s)
+          AND (%s::date IS NULL OR created_at >= %s::date)
+          AND (%s::date IS NULL OR created_at < %s::date + 1)
+        ORDER BY created_at DESC, request_id
+        LIMIT %s OFFSET %s
+        """,
+        (subject_id, outcome, outcome, from_date, from_date, to_date, to_date, limit, offset),
+    )
+
+    if is_other_employee:
+        # a list has no request of its own, so it gets a new request id for the audit log
+        with bind_request_context(caller_id, uuid.uuid4().hex, "rest"):
+            audit.record(
+                "decision_records_viewed",
+                {
+                    "subject_employee_id": subject_id,
+                    "outcome": outcome,
+                    "from_date": from_date.isoformat() if from_date else None,
+                    "to_date": to_date.isoformat() if to_date else None,
+                    "returned": len(rows),
+                },
+                actor="approver",
+            )
+    return [DecisionRecordSummary(**row) for row in rows]

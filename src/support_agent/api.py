@@ -5,17 +5,22 @@ names the employee, and the request is bound to that employee before the graph r
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from functools import lru_cache
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, ConfigDict, Field
 
 from support_agent import db
 from support_agent.config import get_settings
-from support_agent.decision_record import DecisionRecord, get_decision_record
+from support_agent.decision_record import (
+    DecisionRecord,
+    DecisionRecordSummary,
+    get_decision_record,
+    get_decision_records,
+)
 from support_agent.feedback import Rating, create_feedback
 from support_agent.graph import build_graph
 from support_agent.guardrails.approval import AlreadyDecidedError, decide, get_pending_actions
@@ -143,6 +148,28 @@ def create_approval(
     except AlreadyDecidedError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     return ApprovalResponse(action_id=action_id, status=status)
+
+
+@app.get("/decisions")
+def get_decisions(
+    caller_id: Annotated[str, Depends(get_current_employee_id)],
+    outcome: Outcome | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    # a filter that is checked against the caller's role, not the identity of the caller
+    subject_employee_id: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[DecisionRecordSummary]:
+    """The caller's own Decision Records, newest first. Only an HR partner can pass
+    another employee's id; anyone else gets a 403. The dates are inclusive.
+    """
+    try:
+        return get_decision_records(
+            caller_id, subject_employee_id, outcome, from_date, to_date, limit, offset
+        )
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
 
 
 @app.get("/decisions/{request_id}")
