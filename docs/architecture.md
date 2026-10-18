@@ -156,6 +156,9 @@ executed action.
   decision itself is still refused.
 - Approvers are found by the role in the `employees` table. A role in a login token would
   not be trusted.
+- The requester can follow their own actions through `GET /me/actions`. It needs no role
+  and reads only rows of the caller. The Decision Record of the request is not updated
+  after a decision, because it says what the agent did, so the status lives here.
 
 ## REST API
 
@@ -167,6 +170,7 @@ executed action.
 | `GET /decisions` | a summary of the caller's Decision Records, newest first. Filters: `outcome`, `from_date`, `to_date` (inclusive), `subject_employee_id`. Paged with `limit` (default 50, at most 200) and `offset` |
 | `GET /decisions/{request_id}` | the Decision Record. The employee who made the request, or an approver, can read it |
 | `POST /feedback/{request_id}` | a rating (`up` or `down`) and an optional comment. Only the employee who made the request can send it |
+| `GET /me/actions` | the caller's own actions in any status, newest first, with `decided_by` and `decided_at`. Paged with `limit` (default 50, at most 200) and `offset` |
 
 | Status | When |
 |---|---|

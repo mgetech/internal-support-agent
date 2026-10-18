@@ -23,7 +23,12 @@ from support_agent.decision_record import (
 )
 from support_agent.feedback import Rating, create_feedback
 from support_agent.graph import build_graph
-from support_agent.guardrails.approval import AlreadyDecidedError, decide, get_pending_actions
+from support_agent.guardrails.approval import (
+    AlreadyDecidedError,
+    decide,
+    get_own_actions,
+    get_pending_actions,
+)
 from support_agent.llm import get_llm_client
 from support_agent.request_context import bind_request_context
 from support_agent.state import Outcome, new_state
@@ -53,6 +58,18 @@ class PendingAction(BaseModel):
     created_at: datetime
     # false for the caller's own requests: the decision would be refused with a 403
     can_decide: bool
+
+
+class OwnAction(BaseModel):
+    id: int
+    request_id: str
+    tool: str
+    payload: dict[str, Any]
+    status: Literal["pending_approval", "approved", "rejected", "executed", "expired"]
+    # empty until an approver decides
+    decided_by: str | None
+    decided_at: datetime | None
+    created_at: datetime
 
 
 class ApprovalRequest(BaseModel):
@@ -130,6 +147,18 @@ def get_approvals(
         return get_pending_actions(approver_id)
     except PermissionError as error:
         raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+@app.get("/me/actions")
+def get_my_actions(
+    employee_id: Annotated[str, Depends(get_current_employee_id)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[OwnAction]:
+    """The caller's own actions in any status, newest first: whether each one is still
+    waiting, was executed or was rejected, and who decided.
+    """
+    return get_own_actions(employee_id, limit, offset)
 
 
 @app.post("/approvals/{action_id}")

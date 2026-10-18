@@ -365,6 +365,69 @@ def test_a_bad_decision_is_refused(body, client, seeded_db):
     ).fetchone() == ("pending_approval",)
 
 
+def test_my_actions_without_the_header_is_unauthorized(client):
+    assert client.get("/me/actions").status_code == 401
+
+
+def test_an_employee_sees_the_status_of_their_own_actions(client, seeded_db):
+    approved = _propose(seeded_db, "emp_001")
+    rejected = _propose(seeded_db, "emp_001")
+    waiting = _propose(seeded_db, "emp_001")
+    _propose(seeded_db, "emp_002")
+    client.post(
+        f"/approvals/{approved}", json={"decision": "approve"}, headers=_approver("emp_005")
+    )
+    client.post(f"/approvals/{rejected}", json={"decision": "reject"}, headers=_approver("emp_010"))
+
+    response = client.get("/me/actions", headers=CHAT_HEADERS)
+
+    assert response.status_code == 200
+    actions = response.json()
+    assert [(a["id"], a["status"], a["decided_by"]) for a in actions] == [
+        (waiting, "pending_approval", None),
+        (rejected, "rejected", "emp_010"),
+        (approved, "executed", "emp_005"),
+    ]
+    assert actions[0]["decided_at"] is None
+    assert actions[2]["decided_at"] is not None
+    assert actions[2]["tool"] == "submit_leave_request"
+    assert actions[2]["payload"]["working_days"] == 1
+    assert "employee_id" not in actions[0]
+
+
+def test_an_approver_sees_only_their_own_actions_in_the_list(client, seeded_db):
+    _propose(seeded_db, "emp_001")
+    own = _propose(seeded_db, "emp_005")
+
+    response = client.get("/me/actions", headers=_approver("emp_005"))
+
+    assert [a["id"] for a in response.json()] == [own]
+
+
+def test_my_actions_ignores_an_employee_id_in_the_query(client, seeded_db):
+    _propose(seeded_db, "emp_001")
+    other = _propose(seeded_db, "emp_002")
+
+    response = client.get("/me/actions?employee_id=emp_002", headers=CHAT_HEADERS)
+
+    assert other not in [a["id"] for a in response.json()]
+    assert {a["request_id"] for a in response.json()} == {"req-api"}
+    assert len(response.json()) == 1
+
+
+def test_my_actions_are_paged(client, seeded_db):
+    ids = [_propose(seeded_db, "emp_001") for _ in range(3)]
+
+    page = client.get("/me/actions", params={"limit": 1, "offset": 1}, headers=CHAT_HEADERS)
+
+    assert [a["id"] for a in page.json()] == [ids[1]]
+
+
+@pytest.mark.parametrize("query", [{"limit": 0}, {"limit": 201}, {"offset": -1}])
+def test_a_bad_page_for_my_actions_is_refused(query, client, seeded_db):
+    assert client.get("/me/actions", params=query, headers=CHAT_HEADERS).status_code == 422
+
+
 def _save_record() -> dict[str, Any]:
     """Run the wired graph for emp_001 (request "req-1", fake tools, scripted model) and
     save its Decision Record. Returns the record as the API should show it.

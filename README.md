@@ -134,6 +134,7 @@ Rough build order:
 | `GET /decisions` | your Decision Records as a list, newest first, filtered by outcome and date. An HR partner can also list another employee's | Built |
 | `GET /decisions/{request_id}` | the Decision Record of a request: why the agent did what it did | Built |
 | `POST /feedback/{request_id}` | a rating and an optional comment on an answer | Built |
+| `GET /me/actions` | your own actions in any status, with who decided and when | Built |
 | `GET /me/export` | everything the system holds about the employee | Planned |
 | `GET /usage` | requests, tokens and cost in euros per day and employee | Planned |
 
