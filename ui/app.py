@@ -5,6 +5,7 @@ selector is the login stub made visible: it sets the X-Employee-Id header.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -13,6 +14,7 @@ import streamlit as st
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 # the model can take a while to answer
 CHAT_TIMEOUT_SECONDS = 120
+REQUEST_TIMEOUT_SECONDS = 10
 
 # The selector stands in for an identity provider; a real deployment has no employee list.
 EMPLOYEES = {
@@ -61,6 +63,29 @@ def create_chat(employee_id: str, message: str) -> dict[str, Any]:
     return response.json()
 
 
+def get_approvals(employee_id: str) -> list[dict[str, Any]]:
+    """The actions waiting for approval, as the selected employee."""
+    response = httpx.get(
+        f"{API_URL}/approvals",
+        headers={"X-Employee-Id": employee_id},
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def create_approval(employee_id: str, action_id: int, decision: str) -> dict[str, Any]:
+    """Approve or reject an action as the selected employee."""
+    response = httpx.post(
+        f"{API_URL}/approvals/{action_id}",
+        json={"decision": decision},
+        headers={"X-Employee-Id": employee_id},
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def show_outcome_badge(outcome: str) -> None:
     label, color = OUTCOME_BADGES.get(outcome, (outcome, "gray"))
     st.badge(label, color=color)
@@ -103,6 +128,56 @@ def show_chat_tab(employee_id: str) -> None:
     )
 
 
+def show_approvals_tab(employee_id: str) -> None:
+    # the result of the last decision, kept over the rerun that refreshes the list
+    result = st.session_state.pop("approval_result", None)
+    if result:
+        kind, text = result
+        (st.success if kind == "success" else st.error)(text)
+
+    st.button("Refresh", icon=":material/refresh:")
+
+    try:
+        actions = get_approvals(employee_id)
+    except httpx.HTTPError as error:
+        st.error(get_error_message(error))
+        return
+    if not actions:
+        st.info("Nothing is waiting for approval.")
+        return
+
+    for action in actions:
+        action_id = action["id"]
+        requester_name = EMPLOYEES.get(action["employee_id"], ("unknown",))[0]
+        created_at = datetime.fromisoformat(action["created_at"]).astimezone()
+        created_at = created_at.strftime("%Y-%m-%d %H:%M")
+        with st.container(border=True):
+            st.markdown(f"**#{action_id} · {action['tool']}**")
+            st.caption(f"Requested by {requester_name} ({action['employee_id']}) at {created_at}")
+            st.json(action["payload"])
+            # the buttons are always on, so the API's refusals can be seen. A decision on
+            # an own request is refused, and so is any decision from a non-approver
+            with st.container(horizontal=True):
+                approve = st.button(
+                    "Approve", key=f"approve_{action_id}", type="primary", icon=":material/check:"
+                )
+                reject = st.button("Reject", key=f"reject_{action_id}", icon=":material/close:")
+            if not action["can_decide"]:
+                st.caption("This is your own request. The API refuses your decision.")
+
+        if not (approve or reject):
+            continue
+        try:
+            decision = create_approval(employee_id, action_id, "approve" if approve else "reject")
+            st.session_state["approval_result"] = (
+                "success",
+                f"Action {action_id} is {decision['status']}.",
+            )
+        except httpx.HTTPError as error:
+            st.session_state["approval_result"] = ("error", get_error_message(error))
+        st.rerun()
+
+
 def main() -> None:
     st.set_page_config(page_title="Support agent", layout="centered")
     st.title("Support agent")
@@ -115,9 +190,14 @@ def main() -> None:
         )
         st.caption(f"API: {API_URL}")
 
-    (chat_tab,) = st.tabs(["Chat"])
-    with chat_tab:
-        show_chat_tab(employee_id)
+    # only the open tab runs, so the chat does not fetch the queue on every message
+    chat_tab, approvals_tab = st.tabs(["Chat", "Approvals"], key="active_tab", on_change="rerun")
+    if chat_tab.open:
+        with chat_tab:
+            show_chat_tab(employee_id)
+    if approvals_tab.open:
+        with approvals_tab:
+            show_approvals_tab(employee_id)
 
 
 # streamlit runs the script as __main__; a test can import it without drawing the page
