@@ -50,8 +50,9 @@ instead of an answer. Every path ends in `finalize`.
 
 ## Status
 
-**Work in progress.** The agent and its REST API are built. The UI has a chat tab and an approval queue tab, and the
-agent has not run against a live model: the tests use a scripted one. What exists today:
+**Work in progress.** The agent and its REST API are built. The UI has a chat tab with a "Why this answer?" view
+under each reply, an approval queue tab and a decision records tab, and the agent has not
+run against a live model: the tests use a scripted one. What exists today:
 
 - **Synthetic data.** Employees, leave balances, outages and policies, from one
   deterministic generator. The policies in `data/policies` are fictional, written for
@@ -122,7 +123,7 @@ Rough build order:
 | MCP | Official Python MCP SDK (FastMCP) exposing the tool belt; stdio + streamable HTTP | Planned |
 | Eval tooling | Own deterministic harness (gates, trajectory, retrieval) + **RAGAS** for answer quality | Planned |
 | Observability | **Langfuse** (cloud keys via `.env`; self-hostable for residency) | Planned |
-| UI | Streamlit — chat, approval queue, decision records, cost | Partial — chat and approval queue tabs (`make ui`); the other tabs are planned |
+| UI | Streamlit — chat, approval queue, decision records, cost | Partial — chat, approval queue and decision records tabs (`make ui`); the cost tab is planned |
 
 ## REST API
 
