@@ -58,7 +58,8 @@ CITATION_PATTERN = re.compile(r"\[chunk:([^\]\s]+)\]")
 # Shown above every tab. It does not name a contact: the system has no contact data.
 AI_NOTICE = (
     "You are talking to an AI assistant, not a person. It can make mistakes, so open the "
-    "numbered sources in an answer and check important answers with your HR or IT team. "
+    "numbered sources in an answer and check important answers with your HR or IT team."
+    "\n\n"
     "A human is always reachable: you can contact your HR or IT team directly at any time. "
     "Anything that changes data is decided by a person."
 )
@@ -310,6 +311,7 @@ def show_chat_tab(employee_id: str) -> None:
             show_feedback(employee_id, item)
 
     question = st.chat_input("Ask about HR or IT")
+    st.caption("Each message is handled on its own — include all details in one message.")
     if not question:
         return
 

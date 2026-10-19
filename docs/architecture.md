@@ -360,6 +360,26 @@ The agent prompt and the classifier prompt are YAML files in `prompts/`, each wi
 and a version. A test stores a checksum of every prompt, and it fails if the text changes
 and the version does not.
 
+**The agent prompt is written for a single turn.** The graph keeps nothing between
+requests, so the employee's next message reaches an agent that has not seen the last one.
+Version 1.1.0 follows from that:
+
+- When a request has everything a tool needs, the agent calls the tool in the same turn.
+  It does not ask the employee to confirm, because a proposal changes nothing until a person
+  approves it, and that approval is the confirmation.
+- When something is missing, the agent says what is missing and asks for the full request
+  again in one message. It never asks a question and waits.
+- It tells the employee to contact their HR or IT team directly, and does not offer to
+  connect anyone or change a request that was already sent, because it has no tool for
+  that. It does not invite a reply.
+
+Version 1.0.0 offered a human in every answer, so it wrote things like "tell me and I can
+get a human to adjust it". The employee then answered in the next message, to an agent
+with no memory of the first one. The chat tab also says that each message is handled on
+its own.
+
+The agent is not told today's date, so a date without a year can make it ask for the year.
+
 ## Tests
 
 `make test` needs no model keys.
