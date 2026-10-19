@@ -1,7 +1,7 @@
 {
   "agent_system": {
-    "version": "1.0.0",
-    "sha256": "560041ee269e0da40f062d073d898e9671e5c886d8426e9a54644ceedb0dc9fc"
+    "version": "1.1.0",
+    "sha256": "02201d814142c1324a5c731fa07e5fcfcc2eb351aff3d5457366ee09ce23fa08"
   },
   "classifier": {
     "version": "1.0.0",

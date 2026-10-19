@@ -83,8 +83,13 @@ for every tool schema, and another test checks that no tool runs without a bound
 Over REST, the employee comes from the `X-Employee-Id` header. This is a login stub: the
 header is trusted, and the only check is that the employee exists. It is the one place
 where identity enters, so real login (OIDC) would change only that function. No route
-takes an employee id in the path, the query or the body, and a test checks this for every
-route.
+takes an employee id in the path or the body, and a test checks this for every route.
+
+The one employee id in a query is `subject_employee_id` on `GET /decisions`. It does not
+say who the caller is. It says whose records to list, and the service checks it against the
+caller's role (see [Decision Records](#decision-records)). The test has an explicit
+allowlist with only this parameter, so any other identity-like parameter on any route
+still fails it.
 
 ## Tools
 
@@ -151,6 +156,9 @@ executed action.
   decision itself is still refused.
 - Approvers are found by the role in the `employees` table. A role in a login token would
   not be trusted.
+- The requester can follow their own actions through `GET /me/actions`. It needs no role
+  and reads only rows of the caller. The Decision Record of the request is not updated
+  after a decision, because it says what the agent did, so the status lives here.
 
 ## REST API
 
@@ -159,19 +167,51 @@ executed action.
 | `POST /chat` | runs the agent for one message and returns the answer, the outcome and the request id |
 | `GET /approvals` | the actions waiting for approval, with their payload. Approvers only |
 | `POST /approvals/{id}` | approves or rejects an action. The approver is the employee in the header |
-| `GET /decisions/{request_id}` | the Decision Record. The employee who made the request, or an approver, can read it |
+| `GET /decisions` | HR partners only. A summary of Decision Records, newest first. Filters: `outcome`, `from_date`, `to_date` (inclusive), `subject_employee_id`. Paged with `limit` (default 50, at most 200) and `offset` |
+| `GET /decisions/{request_id}` | the full Decision Record. HR partners only |
+| `GET /policy-chunks/{chunk_id}` | the text of one policy section, as an answer cites it. Any employee. The `#` in the id is sent as `%23` |
 | `POST /feedback/{request_id}` | a rating (`up` or `down`) and an optional comment. Only the employee who made the request can send it |
+| `GET /me/actions` | the caller's own actions in any status, newest first, with `decided_by` and `decided_at`. Paged with `limit` (default 50, at most 200) and `offset` |
 
 | Status | When |
 |---|---|
 | 401 | the header is missing, or the employee is unknown |
-| 403 | the employee may not do this: not an approver, or approving their own request |
-| 404 | the action or record does not exist. A record that the employee may not read gives the same answer |
+| 403 | the employee may not do this: not an approver, approving their own request, or reading Decision Records without being an HR partner. A manager is not one |
+| 404 | the action, record or policy section does not exist. A reader who is not an HR partner gets a 403 for every record id, so the answer does not say which ids exist |
 | 409 | the action was already decided |
 | 422 | the body is not valid. Extra fields are refused, so a body cannot carry an employee id |
 
 The graph is built on the first chat request and then reused. Tests replace it with a
 stub, so the API tests need no model keys.
+
+## UI
+
+`ui/app.py` is a Streamlit review surface, not a product. It calls the REST API with
+`httpx` and nothing else: it has no database access and imports nothing from the package.
+
+- **Tabs.** Chat, My requests, Approvals and Decision records. Only the open tab runs, so
+  the chat does not fetch the queue on every message.
+- **Employee selector.** It sets the `X-Employee-Id` header, so it is the login stub made
+  visible. The API has no route that lists employees, and a real deployment would have none
+  either, so the roster is a copy in the file. A test compares it with the seeded
+  `employees` table, so a seed change fails the test instead of drifting.
+- **Refusals are shown.** The approve and reject buttons are always on, and the tabs do not
+  hide what a role may not do. The API's 403 appears as an error, which is the demo of the
+  permission model.
+- **Why this answer?** Only an HR partner can read Decision Records, so only they get
+  this expander under a reply. It reads the record when it opens, not before. The
+  Decision records tab uses the same view for a selected row, and shows the API's 403 to
+  everyone else.
+- **Sources.** Each `[chunk:<id>]` in an answer becomes a number, and a button under the
+  answer opens the text of that policy section through `GET /policy-chunks/{chunk_id}`.
+  Everyone gets this, because the policies are the same for every employee. It is a
+  button and not a link in the text, because a link opened by the browser cannot send
+  the login header.
+- **Notice.** A banner says that the user is talking to an AI and that a person is always
+  reachable. It names no contact, because the system has none. A reply that ended in
+  `escalate` or `propose_action` also says that a person takes over or decides.
+- **Feedback.** A thumb and an optional comment go to `POST /feedback/{request_id}`. The
+  API accepts several ratings for a request; the UI sends one per reply.
 
 ## The graph
 
@@ -247,6 +287,24 @@ Every request that reaches the end of the graph saves one row in `decision_recor
 The record and the final `decision_recorded` audit event are saved in one transaction.
 The request id is unique, so a request can have only one record.
 
+**Who can read records.** Only an `hr_partner`, on both `GET /decisions` and
+`GET /decisions/{request_id}`. Everyone else, managers and the employee who made the
+request included, gets a 403. A record holds the questions an employee asked, which can
+be about health, and the technical detail of the model calls (models, tokens, cost,
+versions, raw evidence). That is for reviewers, so it is limited to HR. An employee will
+get their own data through the data export. A manager decides actions through
+`/approvals` and does not need the records. The role is checked before the record is
+looked up, so a refusal does not say which request ids exist. Feedback is not affected:
+posting it does not read the record.
+
+**Listing.** `GET /decisions` returns a summary of each record (outcome, one sentence,
+time, tokens and cost) and no evidence. Without `subject_employee_id` the HR partner
+gets their own records. When an HR partner reads another employee's records, one at a
+time or as a list, a `decision_records_viewed` audit event is saved before anything is
+returned. Its actor is `approver:<id>`, and its payload has the subject and either the
+request id or the filters and the number of rows. A read has no request of its own, so
+the event gets a new request id.
+
 **Policy version.** Each policy section is stored with the version from its policy file's
 frontmatter. A record names the version that the database holds, not the version of the
 files on disk. If sections of several versions are stored, the record names all of them.
@@ -275,6 +333,7 @@ and a later check cost less. Nothing calls the check at startup yet.
 
 `audit_log` is append-only. Every tool call, proposal, approval, rejection, execution,
 feedback, model call and decision is written with the request id and the actor: `agent`, `employee:<id>`, `approver:<id>` or `system`.
+So is every time an HR partner lists another employee's Decision Records.
 The request id and the employee come from the request context, never from an argument.
 
 ## Model client and cost
@@ -301,6 +360,26 @@ The agent prompt and the classifier prompt are YAML files in `prompts/`, each wi
 and a version. A test stores a checksum of every prompt, and it fails if the text changes
 and the version does not.
 
+**The agent prompt is written for a single turn.** The graph keeps nothing between
+requests, so the employee's next message reaches an agent that has not seen the last one.
+Version 1.1.0 follows from that:
+
+- When a request has everything a tool needs, the agent calls the tool in the same turn.
+  It does not ask the employee to confirm, because a proposal changes nothing until a person
+  approves it, and that approval is the confirmation.
+- When something is missing, the agent says what is missing and asks for the full request
+  again in one message. It never asks a question and waits.
+- It tells the employee to contact their HR or IT team directly, and does not offer to
+  connect anyone or change a request that was already sent, because it has no tool for
+  that. It does not invite a reply.
+
+Version 1.0.0 offered a human in every answer, so it wrote things like "tell me and I can
+get a human to adjust it". The employee then answered in the next message, to an agent
+with no memory of the first one. The chat tab also says that each message is handled on
+its own.
+
+The agent is not told today's date, so a date without a year can make it ask for the year.
+
 ## Tests
 
 `make test` needs no model keys.
@@ -317,7 +396,8 @@ and the version does not.
   row in `leave_requests` or `tickets` exists without an executed action.
 - **Security tests** run for every tool: no identity argument, no run without a bound
   request, and write tools only add to the approval queue. A test also checks that no
-  route takes an employee id, except through the header.
+  route takes an employee id, except through the header and the allowed `GET /decisions`
+  filter.
 
 ## Known limits
 
@@ -330,6 +410,7 @@ and the version does not.
 - No test runs the real graph with the real database from start to end, and no test calls
   a live model.
 - Login is a header stub. Anyone who knows the header can act as any employee.
+- The only UI test checks the employee roster. The tabs have no automated tests.
 - Nothing calls the orphan check at startup.
 - Pending actions never expire. The `expired` status exists, but nothing sets it.
 - `GET /me/export` and `GET /usage` are not built.

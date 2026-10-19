@@ -46,6 +46,22 @@ def get_pending_actions(approver_id: str) -> list[dict[str, Any]]:
     )
 
 
+def get_own_actions(employee_id: str, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    """The employee's own actions in any status, newest first, with who decided and when.
+    It reads only the employee's own rows, so it needs no role.
+    """
+    return db.fetch_all(
+        """
+        SELECT id, request_id, tool, payload, status, decided_by, decided_at, created_at
+        FROM pending_actions
+        WHERE employee_id = %s
+        ORDER BY id DESC
+        LIMIT %s OFFSET %s
+        """,
+        (employee_id, limit, offset),
+    )
+
+
 def validate_approver(action_id: int, approver_id: str) -> None:
     """Raise if the approver may not decide on this action. The role is checked first.
     The checks only read: no row is locked.

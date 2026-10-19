@@ -6,9 +6,12 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from typing import Any
+from typing import Annotated, Any
+from urllib.parse import quote
 
 import pytest
+from data.generate import generate_policy_chunks
+from fastapi import FastAPI, Header
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 from tests.graph_helpers import CLASSIFIED, ScriptedLLM, call_reply, run_graph, text_reply
@@ -80,21 +83,58 @@ def _body_schemas(spec: dict[str, Any]) -> list[Any]:
     ]
 
 
-def test_no_route_takes_an_employee_id_except_the_header():
-    spec = app.openapi()
-    parameters = [
-        p
-        for path in spec["paths"].values()
-        for op in path.values()
-        for p in op.get("parameters", [])
-    ]
+# The one route parameter that may name an employee. It is a filter that the service checks
+# against the caller's role (an HR partner only), not the identity of the caller.
+ALLOWED_IDENTITY_PARAMETERS = {("GET", "/decisions", "subject_employee_id")}
 
-    header_names = {p["name"].lower() for p in parameters if p["in"] == "header"}
-    other_names = [p["name"] for p in parameters if p["in"] != "header"]
+
+def find_identity_parameters(spec: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """(method, path, name) of every header or query parameter that could name an employee,
+    except the login header and the allowed filters.
+    """
+    found = []
+    for path, operations in spec["paths"].items():
+        for method, operation in operations.items():
+            for parameter in operation.get("parameters", []):
+                name = parameter["name"]
+                if not is_identity_field(name):
+                    continue
+                if parameter["in"] == "header" and name.lower() == "x-employee-id":
+                    continue
+                if (method.upper(), path, name) in ALLOWED_IDENTITY_PARAMETERS:
+                    continue
+                found.append((method.upper(), path, name))
+    return found
+
+
+def test_no_route_takes_an_employee_id_except_the_header_and_the_allowed_filter():
+    spec = app.openapi()
     body_names = [name for schema in _body_schemas(spec) for name in property_names(schema)]
 
-    assert {n for n in header_names if is_identity_field(n)} <= {"x-employee-id"}
-    assert [n for n in other_names + body_names if is_identity_field(n)] == []
+    assert find_identity_parameters(spec) == []
+    assert [n for n in body_names if is_identity_field(n)] == []
+
+
+def test_the_allowed_filter_is_the_only_one_that_passes():
+    other = FastAPI()
+
+    @other.get("/decisions")
+    def list_decisions(subject_employee_id: str | None = None) -> list[str]:
+        return []
+
+    @other.get("/reports")
+    def list_reports(subject_employee_id: str | None = None, employee_id: str | None = None):
+        return []
+
+    @other.post("/notes")
+    def create_note(user_id: Annotated[str, Header()]):
+        return {}
+
+    assert find_identity_parameters(other.openapi()) == [
+        ("GET", "/reports", "subject_employee_id"),
+        ("GET", "/reports", "employee_id"),
+        ("POST", "/notes", "user-id"),
+    ]
 
 
 # INTEGRATION TESTS: the tests below use the real Postgres (make db-up).
@@ -327,6 +367,69 @@ def test_a_bad_decision_is_refused(body, client, seeded_db):
     ).fetchone() == ("pending_approval",)
 
 
+def test_my_actions_without_the_header_is_unauthorized(client):
+    assert client.get("/me/actions").status_code == 401
+
+
+def test_an_employee_sees_the_status_of_their_own_actions(client, seeded_db):
+    approved = _propose(seeded_db, "emp_001")
+    rejected = _propose(seeded_db, "emp_001")
+    waiting = _propose(seeded_db, "emp_001")
+    _propose(seeded_db, "emp_002")
+    client.post(
+        f"/approvals/{approved}", json={"decision": "approve"}, headers=_approver("emp_005")
+    )
+    client.post(f"/approvals/{rejected}", json={"decision": "reject"}, headers=_approver("emp_010"))
+
+    response = client.get("/me/actions", headers=CHAT_HEADERS)
+
+    assert response.status_code == 200
+    actions = response.json()
+    assert [(a["id"], a["status"], a["decided_by"]) for a in actions] == [
+        (waiting, "pending_approval", None),
+        (rejected, "rejected", "emp_010"),
+        (approved, "executed", "emp_005"),
+    ]
+    assert actions[0]["decided_at"] is None
+    assert actions[2]["decided_at"] is not None
+    assert actions[2]["tool"] == "submit_leave_request"
+    assert actions[2]["payload"]["working_days"] == 1
+    assert "employee_id" not in actions[0]
+
+
+def test_an_approver_sees_only_their_own_actions_in_the_list(client, seeded_db):
+    _propose(seeded_db, "emp_001")
+    own = _propose(seeded_db, "emp_005")
+
+    response = client.get("/me/actions", headers=_approver("emp_005"))
+
+    assert [a["id"] for a in response.json()] == [own]
+
+
+def test_my_actions_ignores_an_employee_id_in_the_query(client, seeded_db):
+    _propose(seeded_db, "emp_001")
+    other = _propose(seeded_db, "emp_002")
+
+    response = client.get("/me/actions?employee_id=emp_002", headers=CHAT_HEADERS)
+
+    assert other not in [a["id"] for a in response.json()]
+    assert {a["request_id"] for a in response.json()} == {"req-api"}
+    assert len(response.json()) == 1
+
+
+def test_my_actions_are_paged(client, seeded_db):
+    ids = [_propose(seeded_db, "emp_001") for _ in range(3)]
+
+    page = client.get("/me/actions", params={"limit": 1, "offset": 1}, headers=CHAT_HEADERS)
+
+    assert [a["id"] for a in page.json()] == [ids[1]]
+
+
+@pytest.mark.parametrize("query", [{"limit": 0}, {"limit": 201}, {"offset": -1}])
+def test_a_bad_page_for_my_actions_is_refused(query, client, seeded_db):
+    assert client.get("/me/actions", params=query, headers=CHAT_HEADERS).status_code == 422
+
+
 def _save_record() -> dict[str, Any]:
     """Run the wired graph for emp_001 (request "req-1", fake tools, scripted model) and
     save its Decision Record. Returns the record as the API should show it.
@@ -343,15 +446,50 @@ def _save_record() -> dict[str, Any]:
     return records[0].model_dump()
 
 
+HR_HEADERS = {"X-Employee-Id": "emp_005"}
+
+
+def _insert_record(
+    conn, request_id: str, employee_id: str, outcome: str = "resolve", day: date = date(2026, 9, 22)
+) -> None:
+    """Insert a minimal Decision Record that was created at noon on the given day."""
+    conn.execute(
+        """
+        INSERT INTO decision_records (request_id, employee_id, channel, outcome, summary,
+                                      evidence, prompt_versions, verifier, model_calls,
+                                      latency_ms, created_at)
+        VALUES (%s, %s, 'rest', %s, %s, '[{"type": "classification"}]', '{}', '[]', '[]', 0,
+                %s::date + time '12:00')
+        """,
+        (request_id, employee_id, outcome, f"Summary of {request_id}.", day),
+    )
+
+
+def _list_ids(client, subject: str = "emp_005", **query) -> list[str]:
+    """The request ids that the HR partner emp_005 gets for the subject's records."""
+    if subject != "emp_005":
+        query["subject_employee_id"] = subject
+    response = client.get("/decisions", params=query, headers=HR_HEADERS)
+    assert response.status_code == 200
+    return [item["request_id"] for item in response.json()]
+
+
+def _viewed_events(conn) -> list[tuple[str, dict[str, Any]]]:
+    return conn.execute(
+        "SELECT actor, payload FROM audit_log WHERE event = 'decision_records_viewed'"
+    ).fetchall()
+
+
 def test_decision_endpoints_without_the_header_are_unauthorized(client):
+    assert client.get("/decisions").status_code == 401
     assert client.get("/decisions/req-1").status_code == 401
     assert client.post("/feedback/req-1", json={"rating": "up"}).status_code == 401
 
 
-def test_decision_record_explains_the_answer_without_running_anything(client, seeded_db):
+def test_an_hr_partner_reads_the_full_record(client, seeded_db):
     saved = _save_record()
 
-    response = client.get("/decisions/req-1", headers=CHAT_HEADERS)
+    response = client.get("/decisions/req-1", headers=HR_HEADERS)
 
     assert response.status_code == 200
     body = response.json()
@@ -365,25 +503,178 @@ def test_decision_record_explains_the_answer_without_running_anything(client, se
     ]
 
 
-@pytest.mark.parametrize("reader", ["emp_005", "emp_010"], ids=["hr_partner", "manager"])
-def test_an_approver_can_read_another_employees_record(reader, client, seeded_db):
+@pytest.mark.parametrize(
+    "reader", ["emp_001", "emp_002", "emp_010"], ids=["requester", "other-employee", "manager"]
+)
+def test_only_an_hr_partner_can_read_a_record(reader, client, seeded_db):
     _save_record()
 
     response = client.get("/decisions/req-1", headers=_approver(reader))
 
-    assert response.status_code == 200
+    assert response.status_code == 403
+    assert "evidence" not in response.json()
+    assert _viewed_events(seeded_db) == []
 
 
-def test_another_employee_cannot_read_the_record(client, seeded_db):
+def test_a_refused_reader_cannot_tell_which_records_exist(client, seeded_db):
     _save_record()
 
-    response = client.get("/decisions/req-1", headers=_approver("emp_002"))
+    existing = client.get("/decisions/req-1", headers=CHAT_HEADERS)
+    missing = client.get("/decisions/req-999", headers=CHAT_HEADERS)
 
-    assert response.status_code == 404
+    assert existing.status_code == missing.status_code == 403
+    assert existing.json() == missing.json()
 
 
-def test_an_unknown_request_is_not_found(client, seeded_db):
-    assert client.get("/decisions/req-999", headers=CHAT_HEADERS).status_code == 404
+def test_an_unknown_request_is_not_found_for_an_hr_partner(client, seeded_db):
+    assert client.get("/decisions/req-999", headers=HR_HEADERS).status_code == 404
+
+
+def test_reading_another_employees_record_is_audited(client, seeded_db):
+    _save_record()
+
+    client.get("/decisions/req-1", headers=HR_HEADERS)
+
+    assert _viewed_events(seeded_db) == [
+        ("approver:emp_005", {"subject_employee_id": "emp_001", "request_id": "req-1"})
+    ]
+
+
+def test_an_hr_partner_reading_their_own_record_is_not_audited(client, seeded_db):
+    _insert_record(seeded_db, "req-hr", "emp_005")
+
+    assert client.get("/decisions/req-hr", headers=HR_HEADERS).status_code == 200
+    assert _viewed_events(seeded_db) == []
+
+
+@pytest.mark.parametrize("caller", ["emp_001", "emp_010"], ids=["employee", "manager"])
+@pytest.mark.parametrize("query", [{}, {"subject_employee_id": "emp_002"}], ids=["own", "other"])
+def test_only_an_hr_partner_can_list_records(caller, query, client, seeded_db):
+    _insert_record(seeded_db, "req-own", caller)
+    _insert_record(seeded_db, "req-other", "emp_002")
+
+    response = client.get("/decisions", params=query, headers=_approver(caller))
+
+    assert response.status_code == 403
+    assert _viewed_events(seeded_db) == []
+
+
+def test_an_hr_partner_lists_their_own_records_newest_first(client, seeded_db):
+    _insert_record(seeded_db, "req-old", "emp_005", day=date(2026, 9, 1))
+    _insert_record(seeded_db, "req-new", "emp_005", day=date(2026, 9, 20))
+    _insert_record(seeded_db, "req-other", "emp_002")
+
+    response = client.get("/decisions", headers=HR_HEADERS)
+
+    assert response.status_code == 200
+    items = response.json()
+    assert [item["request_id"] for item in items] == ["req-new", "req-old"]
+    assert {item["employee_id"] for item in items} == {"emp_005"}
+    # the list is a summary: the evidence is read through /decisions/{request_id}
+    assert set(items[0]) == {
+        "request_id",
+        "employee_id",
+        "outcome",
+        "summary",
+        "created_at",
+        "total_tokens",
+        "total_cost_eur",
+    }
+    assert _viewed_events(seeded_db) == []
+
+
+def test_an_hr_partner_can_name_themselves_as_the_subject(client, seeded_db):
+    _insert_record(seeded_db, "req-hr", "emp_005")
+
+    ids = _list_ids(client, subject_employee_id="emp_005")
+
+    assert ids == ["req-hr"]
+    assert _viewed_events(seeded_db) == []
+
+
+def test_an_hr_partner_lists_another_employees_records_and_it_is_audited(client, seeded_db):
+    _insert_record(seeded_db, "req-1", "emp_002", outcome="escalate")
+    _insert_record(seeded_db, "req-2", "emp_001")
+
+    ids = _list_ids(client, "emp_002", outcome="escalate", from_date="2026-09-01")
+
+    assert ids == ["req-1"]
+    assert _viewed_events(seeded_db) == [
+        (
+            "approver:emp_005",
+            {
+                "subject_employee_id": "emp_002",
+                "outcome": "escalate",
+                "from_date": "2026-09-01",
+                "to_date": None,
+                "returned": 1,
+            },
+        )
+    ]
+
+
+def test_the_list_filters_by_outcome(client, seeded_db):
+    _insert_record(seeded_db, "req-resolve", "emp_001", outcome="resolve")
+    _insert_record(seeded_db, "req-propose", "emp_001", outcome="propose_action")
+    _insert_record(seeded_db, "req-escalate", "emp_001", outcome="escalate")
+
+    assert _list_ids(client, "emp_001", outcome="propose_action") == ["req-propose"]
+    assert sorted(_list_ids(client, "emp_001")) == ["req-escalate", "req-propose", "req-resolve"]
+
+
+def test_the_list_filters_by_an_inclusive_date_range(client, seeded_db):
+    for request_id, day in [("req-1", 1), ("req-2", 10), ("req-3", 20)]:
+        _insert_record(seeded_db, request_id, "emp_001", day=date(2026, 9, day))
+
+    assert _list_ids(client, "emp_001", from_date="2026-09-10", to_date="2026-09-10") == ["req-2"]
+    assert _list_ids(client, "emp_001", from_date="2026-09-10") == ["req-3", "req-2"]
+    assert _list_ids(client, "emp_001", to_date="2026-09-10") == ["req-2", "req-1"]
+
+
+def test_the_list_is_paged_with_a_default_limit_of_50(client, seeded_db):
+    for number in range(51):
+        _insert_record(seeded_db, f"req-{number:02}", "emp_001")
+
+    assert len(_list_ids(client, "emp_001")) == 50
+    assert _list_ids(client, "emp_001", limit=2, offset=50) == ["req-50"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [{"limit": 0}, {"limit": 201}, {"offset": -1}, {"outcome": "maybe"}, {"from_date": "soon"}],
+)
+def test_a_bad_list_filter_is_refused(query, client, seeded_db):
+    response = client.get("/decisions", params=query, headers=HR_HEADERS)
+
+    assert response.status_code == 422
+
+
+def _first_policy_chunk() -> dict[str, Any]:
+    return next(c for c in generate_policy_chunks() if c["chunker"] == "structural")
+
+
+def test_policy_chunks_need_the_header(client):
+    assert client.get("/policy-chunks/vacation-policy%23entitlement%230").status_code == 401
+
+
+def test_any_employee_reads_the_text_of_a_cited_policy_section(client, seeded_db):
+    chunk = _first_policy_chunk()
+
+    # the id has '#' in it, which a client sends as %23
+    response = client.get(f"/policy-chunks/{quote(chunk['id'], safe='')}", headers=CHAT_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": chunk["id"],
+        "policy": chunk["policy"],
+        "heading": chunk["heading"],
+        "content": chunk["content"],
+        "policy_version": chunk["policy_version"],
+    }
+
+
+def test_an_unknown_policy_chunk_is_not_found(client, seeded_db):
+    assert client.get("/policy-chunks/nope%23nope%230", headers=CHAT_HEADERS).status_code == 404
 
 
 def test_feedback_is_saved_with_a_rating_and_a_comment(client, seeded_db):

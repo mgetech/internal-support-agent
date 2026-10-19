@@ -139,10 +139,21 @@ def test_committed_prompts_match_committed_checksums():
     assert version_problems(load_prompts(), recorded) == []
 
 
-def test_agent_prompt_has_the_seven_rules_in_order():
+def test_agent_prompt_has_the_eight_rules_in_order():
     text = load_prompts()["agent_system"].text
-    rule_starts = [text.find(f"\n{n}. ") for n in range(1, 8)]
+    rule_starts = [text.find(f"\n{n}. ") for n in range(1, 9)]
 
     assert -1 not in rule_starts
     assert rule_starts == sorted(rule_starts)
-    assert "\n8. " not in text
+    assert "\n9. " not in text
+
+
+def test_agent_prompt_proposes_without_asking_and_never_invites_a_reply():
+    """Each request is single-turn, so the agent must not ask a question and wait."""
+    text = " ".join(load_prompts()["agent_system"].text.split())
+
+    assert "call the tool in the same turn" in text
+    assert "Do not ask the employee to confirm first" in text
+    assert "Never invite a reply" in text
+    assert "never offer to" in text
+    assert "ask the employee to send the full request again in one message" in text
