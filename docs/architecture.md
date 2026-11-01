@@ -407,14 +407,25 @@ Version 1.1.0 follows from that:
   approves it, and that approval is the confirmation.
 - When something is missing, the agent says what is missing and asks for the full request
   again in one message. It never asks a question and waits.
-- It tells the employee to contact their HR or IT team directly, and does not offer to
-  connect anyone or change a request that was already sent, because it has no tool for
-  that. It does not invite a reply.
+- It does not offer to connect anyone or change a request that was already sent, because
+  it has no tool for that. It does not invite a reply.
 
 Version 1.0.0 offered a human in every answer, so it wrote things like "tell me and I can
 get a human to adjust it". The employee then answered in the next message, to an agent
 with no memory of the first one. The chat tab also says that each message is handled on
 its own.
+
+Version 1.2.0 stops the agent from inventing advice and from repeating the handoff line:
+
+- Steps and workarounds must come from a tool result or a cited policy. Without a source
+  the agent says that the relevant team can advise. It never suggests a way around a
+  security control such as the VPN.
+- Before it proposes a ticket or a leave request, the agent searches the policies for rules
+  that apply, for example the approval a software license needs because of its cost, and
+  mentions them with a citation.
+- It mentions contacting HR or IT only when it escalates, refuses or cannot handle the
+  request. The banner in the UI already gives the general reminder, so version 1.1.0's
+  line at the end of every answer is gone.
 
 The agent is not told today's date, so a date without a year can make it ask for the year.
 
