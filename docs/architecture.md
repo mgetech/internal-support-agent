@@ -205,6 +205,10 @@ stub, so the API tests need no model keys.
 
 - **Tabs.** Chat, My requests, Approvals and Decision records. Only the open tab runs, so
   the chat does not fetch the queue on every message.
+- **My requests.** It lists every proposal of the selected employee with a status badge:
+  the ones waiting for approval first, then the history, each newest first. It asks for 200
+  actions, the most the API gives, and says so when the list is cut there. The order is made
+  in the UI, so `GET /me/actions` stays plain newest first.
 - **Employee selector.** It sets the `X-Employee-Id` header, so it is the login stub made
   visible. The API has no route that lists employees, and a real deployment would have none
   either, so the roster is a copy in the file. A test compares it with the seeded
