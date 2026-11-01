@@ -7,8 +7,9 @@ On Azure, `model` is the name of the deployment.
 
 Every try, every switch to the fallback model and the final failure adds an evidence
 item to the request and a `model_call` audit event. The item's `type` tells them apart.
-The whole chain can be read back from the Decision Record. A successful try also
-carries its token counts and its cost in EUR.
+The whole chain can be read back from the Decision Record. Every try also
+carries `latency_ms`, the time the call took (the wait between tries is not counted). A
+successful try also carries its token counts and its cost in EUR.
 
 The retry rules follow the OpenAI SDK: retry on connection errors and on status 408,
 409, 429 and 5xx. The SDK's own retries are turned off, so the limit is only in this file.
@@ -62,6 +63,7 @@ class LLMClient:
         max_retries: int = MAX_RETRIES,
         retry_delay: float = INITIAL_RETRY_DELAY,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._client = client
         self._price_table = price_table
@@ -69,6 +71,7 @@ class LLMClient:
         self._max_retries = max_retries
         self._retry_delay = retry_delay
         self._sleep = sleep
+        self._clock = clock
 
     def create(
         self,
@@ -91,21 +94,24 @@ class LLMClient:
 
         for position, current in enumerate(models):
             for attempt in range(1, tries + 1):
+                started = self._clock()
                 try:
                     response = self._client.responses.create(model=current, input=input, **options)
                     if response.status == "failed":
                         raise RuntimeError(response.error.message if response.error else "failed")
                 except Exception as exc:
+                    latency_ms = round((self._clock() - started) * 1000)
                     last_error = exc
                     retryable = is_retryable(exc)
                     status = "retryable_error" if retryable else "error"
-                    self._record(current, attempt, status, prompt_tag, error=exc)
+                    self._record(current, attempt, status, prompt_tag, latency_ms, error=exc)
                     if retryable and attempt < tries:
                         # wait 1x, 2x, 4x ... the base delay before the next try
                         self._sleep(self._retry_delay * 2 ** (attempt - 1))
                         continue
                     break
-                self._record(current, attempt, "ok", prompt_tag, response=response)
+                latency_ms = round((self._clock() - started) * 1000)
+                self._record(current, attempt, "ok", prompt_tag, latency_ms, response=response)
                 return response
 
             if position + 1 < len(models):
@@ -124,6 +130,7 @@ class LLMClient:
         attempt: int,
         status: str,
         prompt_tag: dict[str, str] | None,
+        latency_ms: int,
         error: Exception | None = None,
         response: Response | None = None,
     ) -> None:
@@ -133,6 +140,7 @@ class LLMClient:
             "attempt": attempt,
             "status": status,
             "prompt": prompt_tag,
+            "latency_ms": latency_ms,
         }
         if error is not None:
             item["error"] = f"{type(error).__name__}: {error}"[:200]

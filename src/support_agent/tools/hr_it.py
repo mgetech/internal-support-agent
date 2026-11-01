@@ -5,6 +5,7 @@ model can only ever see or act on the requester's own records.
 from __future__ import annotations
 
 import json
+import time
 from datetime import date, timedelta
 from typing import Any, Literal
 
@@ -49,12 +50,15 @@ def get_leave_balance(year: int = 2026) -> str:
     the requester about both numbers. Use this for any question about how much leave they
     have left.
     """
+    started_at = time.perf_counter()
     ctx = get_request_context()
     with db.transaction() as cur:
         row = _read_leave_balance(cur, ctx.employee_id, year)
     ref = f"leave_balances:{ctx.employee_id}:{year}"
     if row is None:
-        record_tool_call("get_leave_balance", {"year": year}, f"no balance for {year}", None)
+        record_tool_call(
+            "get_leave_balance", {"year": year}, f"no balance for {year}", None, started_at
+        )
         return json.dumps({"year": year, "error": "no leave balance on record for this year"})
 
     entitlement = float(row["entitlement_days"])
@@ -69,6 +73,7 @@ def get_leave_balance(year: int = 2026) -> str:
         f"{remaining} of {entitlement} days left in {year}, "
         f"{awaiting} awaiting approval, {remaining_if_all_approved} left if all are approved",
         ref,
+        started_at,
     )
     return json.dumps(
         {
@@ -87,6 +92,7 @@ def get_known_outages() -> str:
     """List IT outages that are not resolved yet, with the affected system, status and a
     short note. Check this before suggesting a ticket for something that is not working.
     """
+    started_at = time.perf_counter()
     # no per-employee data here, but every tool still refuses to run outside a request
     get_request_context()
     rows = db.fetch_all(
@@ -99,7 +105,7 @@ def get_known_outages() -> str:
     )
     systems = [r["system"] for r in rows]
     summary = f"open outages: {', '.join(systems)}" if systems else "no open outages"
-    record_tool_call("get_known_outages", {}, summary, "known_outages")
+    record_tool_call("get_known_outages", {}, summary, "known_outages", started_at)
     return json.dumps(
         {
             "outages": [
@@ -185,6 +191,7 @@ def submit_leave_request(start_date: date, end_date: date) -> str:
     true, the same request was sent before and is still waiting for approval. No new
     request was made.
     """
+    started_at = time.perf_counter()
     get_request_context()
     args = {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()}
     with db.transaction() as cur:
@@ -196,7 +203,7 @@ def submit_leave_request(start_date: date, end_date: date) -> str:
         else:
             summary = f"not proposed: {result['reason']}"
             ref = None
-        record_tool_call("submit_leave_request", args, summary, ref, conn=cur)
+        record_tool_call("submit_leave_request", args, summary, ref, started_at, conn=cur)
     return json.dumps(result)
 
 
@@ -296,6 +303,7 @@ def create_ticket(category: TicketCategory, title: str, body: str) -> str:
     If "already_sent" is true, the same ticket was sent before and is still waiting
     for approval. No new ticket was made.
     """
+    started_at = time.perf_counter()
     get_request_context()
     args = {"category": category, "title": title, "body": body}
     with db.transaction() as cur:
@@ -307,7 +315,7 @@ def create_ticket(category: TicketCategory, title: str, body: str) -> str:
         else:
             summary = f"not proposed: {result['reason']}"
             ref = None
-        record_tool_call("create_ticket", args, summary, ref, conn=cur)
+        record_tool_call("create_ticket", args, summary, ref, started_at, conn=cur)
     return json.dumps(result)
 
 

@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 
 import httpx
@@ -84,13 +85,15 @@ def sleeps():
     return []
 
 
-def run(responses, sleeps, fallback_model="", **options):
+def run(responses, sleeps, fallback_model="", clock=time.perf_counter, **options):
     """Run one call in a bound request. `responses` is what the fake client returns
     or raises on each call. Returns the fake client, the result (a response or the
     LLMUnavailableError) and the request's evidence.
     """
     fake = FakeOpenAI(responses)
-    client = LLMClient(fake, PRICES, fallback_model=fallback_model, sleep=sleeps.append)
+    client = LLMClient(
+        fake, PRICES, fallback_model=fallback_model, sleep=sleeps.append, clock=clock
+    )
     with bind_request_context("emp_001", "req-1", "rest") as ctx:
         try:
             result = client.create("main", [{"role": "user", "content": "hi"}], PROMPT, **options)
@@ -122,6 +125,33 @@ def test_successful_call_carries_tokens_and_cost(audit_events, sleeps):
     assert evidence[0]["input_tokens"] == 1000
     assert evidence[0]["output_tokens"] == 500
     assert evidence[0]["cost_eur"] == pytest.approx(0.002)
+
+
+def _clock(*times):
+    """A clock that returns the given times one after the other, in seconds."""
+    readings = iter(times)
+    return lambda: next(readings)
+
+
+def test_successful_call_carries_its_latency(audit_events, sleeps):
+    # the clock is read when the call starts and when it ends
+    _, _, evidence = run([answer()], sleeps, clock=_clock(10.0, 10.25))
+
+    assert evidence[0]["latency_ms"] == 250
+
+
+def test_every_try_has_its_own_latency_and_the_wait_is_not_counted(audit_events, sleeps):
+    clock = _clock(0.0, 0.5, 100.0, 100.125)
+    _, _, evidence = run([rate_limited(), answer()], sleeps, clock=clock)
+
+    assert [item["status"] for item in evidence] == ["retryable_error", "ok"]
+    assert [item["latency_ms"] for item in evidence] == [500, 125]
+
+
+def test_latency_is_in_the_audit_event_too(audit_events, sleeps):
+    run([answer()], sleeps, clock=_clock(0.0, 0.3))
+
+    assert audit_events[0]["latency_ms"] == 300
 
 
 @pytest.mark.parametrize("make_error", [rate_limited, server_error, connection_error])

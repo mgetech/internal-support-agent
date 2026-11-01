@@ -5,6 +5,7 @@ merged with reciprocal rank fusion.
 from __future__ import annotations
 
 import json
+import time
 
 from support_agent import db
 from support_agent.embeddings import embed_texts
@@ -68,6 +69,7 @@ def search_policies(query: str) -> str:
     only ids returned here. If nothing returned answers the question, say so instead
     of guessing.
     """
+    started_at = time.perf_counter()
     get_request_context()
     (embedding,) = embed_texts([query])
 
@@ -99,7 +101,7 @@ def search_policies(query: str) -> str:
 
     top = fuse([[r["id"] for r in by_vector], [r["id"] for r in by_keyword]])[:TOP_K]
     summary = f"{len(top)} chunks found" if top else "no chunks found"
-    record_tool_call("search_policies", {"query": query}, summary, top)
+    record_tool_call("search_policies", {"query": query}, summary, top, started_at)
     if not top:
         return json.dumps({"results": []})
 

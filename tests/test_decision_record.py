@@ -106,7 +106,7 @@ def final_state(outcome="resolve", evidence=(), proposed_action_ids=()):
     }
 
 
-def model_call(model, prompt, input_tokens, output_tokens, cost_eur):
+def model_call(model, prompt, input_tokens, output_tokens, cost_eur, latency_ms=100):
     """An evidence item for a model call that worked, as the model client writes it."""
     return {
         "type": "model_call",
@@ -117,6 +117,7 @@ def model_call(model, prompt, input_tokens, output_tokens, cost_eur):
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cost_eur": cost_eur,
+        "latency_ms": latency_ms,
     }
 
 
@@ -189,6 +190,17 @@ def test_a_failed_model_try_is_in_the_evidence_but_not_in_the_model_calls():
 
     assert len(record.evidence) == 2
     assert len(record.model_calls) == 1
+
+
+def test_each_model_call_in_the_record_has_its_latency():
+    evidence = [
+        model_call("small", CLASSIFIER_PROMPT, 1, 1, 0.0, latency_ms=300),
+        model_call("main", AGENT_PROMPT, 1, 1, 0.0, latency_ms=1500),
+    ]
+
+    record = build_record(final_state(evidence=evidence))
+
+    assert [call["latency_ms"] for call in record.model_calls] == [300, 1500]
 
 
 def test_the_record_lists_each_prompt_version_that_was_used():

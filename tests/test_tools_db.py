@@ -12,16 +12,19 @@ import pytest
 from data.generate import GENERATED_AS_OF
 from tests.tool_args import sample_args
 
+from support_agent import audit
 from support_agent.request_context import bind_request_context
 from support_agent.tools import (
     TOOLS,
     Tool,
+    base,
     create_ticket,
     get_known_outages,
     get_leave_balance,
     search_policies,
     submit_leave_request,
 )
+from support_agent.tools.base import record_tool_call
 from support_agent.tools.hr_it import calculate_working_days
 from support_agent.tools.policy_search import fuse
 
@@ -33,6 +36,18 @@ def _as(employee_id: str, fn: Tool, *args, **kwargs) -> dict:
 
 def _count(conn, table: str) -> int:
     return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+
+
+def test_a_recorded_tool_call_has_the_time_since_it_started(monkeypatch):
+    events = []
+    monkeypatch.setattr(audit, "record", lambda event, payload, **kwargs: events.append(payload))
+    monkeypatch.setattr(base.time, "perf_counter", lambda: 12.5)
+
+    with bind_request_context("emp_001", "req-latency", "rest") as ctx:
+        record_tool_call("some_tool", {}, "done", None, started_at=12.0)
+
+    assert ctx.evidence[0]["latency_ms"] == 500
+    assert events[0]["latency_ms"] == 500
 
 
 def test_fuse_ranks_ids_found_by_both_rankings_first():
@@ -226,7 +241,10 @@ def test_every_tool_call_is_audited_and_recorded(fn: Tool, seeded_db, search_emb
         fn(**sample_args(fn))
 
     rows = seeded_db.execute(
-        "SELECT request_id, payload->>'tool' FROM audit_log WHERE event = 'tool_call'"
+        "SELECT request_id, payload->>'tool', (payload->>'latency_ms')::int"
+        " FROM audit_log WHERE event = 'tool_call'"
     ).fetchall()
-    assert rows == [("req-audit", fn.__name__)]
+    assert [(r[0], r[1]) for r in rows] == [("req-audit", fn.__name__)]
     assert [(e["type"], e["tool"]) for e in ctx.evidence] == [("tool_result", fn.__name__)]
+    # the evidence and the audit event have the same time, and it is not negative
+    assert ctx.evidence[0]["latency_ms"] == rows[0][2] >= 0

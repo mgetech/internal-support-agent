@@ -295,7 +295,8 @@ Every request that reaches the end of the graph saves one row in `decision_recor
   wording, so no model writes it
 - the evidence in order, and the citations of the final answer
 - the policy version, the prompt versions and every check result
-- each model call with tokens and cost in euros, the totals, and the time taken
+- each model call with tokens, cost in euros and time taken, the totals, and the time the
+  whole request took
 - the trace id, which is empty because tracing is not built yet
 
 The record and the final `decision_recorded` audit event are saved in one transaction.
@@ -364,6 +365,11 @@ Azure OpenAI.
   evidence item, so the fallback chain can be read from the record alone.
 - **Cost.** Each successful call gets its token counts and its cost in euros from a price
   table in the settings. Creating the client fails if a model has no price.
+- **Latency.** Every try has `latency_ms`, the time of that one call. The wait between
+  tries is not counted. Failed tries have it too, because a slow failure is also useful to
+  know. Every tool result in the evidence has `latency_ms` as well. It runs from the start
+  of the tool to the moment the result is recorded, so the commit of a proposal and the
+  last read of a policy search are not in it.
 
 We wrote this retry and did not use LangGraph's `RetryPolicy`. It would run the whole node
 again. It could not switch to a fallback model or record each try.

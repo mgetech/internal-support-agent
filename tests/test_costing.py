@@ -51,7 +51,7 @@ def test_validate_prices_names_every_missing_model():
         validate_prices(PRICES, ["gpt-5", "gpt-4.1", "gpt-9"])
 
 
-def _ok(model, input_tokens, output_tokens, cost_eur):
+def _ok(model, input_tokens, output_tokens, cost_eur, latency_ms):
     return {
         "type": "model_call",
         "model": model,
@@ -60,23 +60,36 @@ def _ok(model, input_tokens, output_tokens, cost_eur):
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cost_eur": cost_eur,
+        "latency_ms": latency_ms,
     }
 
 
 EVIDENCE = [
     {"type": "tool_result", "tool": "get_leave_balance", "summary": "x", "ref": None},
     {"type": "model_call", "model": "gpt-5", "attempt": 1, "status": "retryable_error"},
-    _ok("gpt-5", 1000, 500, 0.005375),
+    _ok("gpt-5", 1000, 500, 0.005375, 1200),
     {"type": "model_fallback", "from": "gpt-5", "to": "gpt-5-mini"},
     {"type": "model_call", "model": "gpt-5-mini", "attempt": 1, "status": "error"},
-    _ok("gpt-5-mini", 2000, 1000, 0.00215),
+    _ok("gpt-5-mini", 2000, 1000, 0.00215, 800),
 ]
 
 
 def test_model_calls_lists_only_successful_model_calls():
     assert model_calls(EVIDENCE) == [
-        {"model": "gpt-5", "input_tokens": 1000, "output_tokens": 500, "cost_eur": 0.005375},
-        {"model": "gpt-5-mini", "input_tokens": 2000, "output_tokens": 1000, "cost_eur": 0.00215},
+        {
+            "model": "gpt-5",
+            "input_tokens": 1000,
+            "output_tokens": 500,
+            "cost_eur": 0.005375,
+            "latency_ms": 1200,
+        },
+        {
+            "model": "gpt-5-mini",
+            "input_tokens": 2000,
+            "output_tokens": 1000,
+            "cost_eur": 0.00215,
+            "latency_ms": 800,
+        },
     ]
 
 
