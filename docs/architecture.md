@@ -374,6 +374,18 @@ Azure OpenAI.
   know. Every tool result in the evidence has `latency_ms` as well. It runs from the start
   of the tool to the moment the result is recorded, so the commit of a proposal and the
   last read of a policy search are not in it.
+- **Reasoning effort.** How long a reasoning model thinks is a setting for each
+  deployment: `REASONING_EFFORT_CLASSIFIER` (default `minimal`), `REASONING_EFFORT_AGENT`
+  (default `low`) and `REASONING_EFFORT_FALLBACK` (default empty). The classifier only picks
+  a label, so it needs very little thinking, and the agent loop makes several calls per
+  request, so every call counts. The client sends the value as the `reasoning` option of
+  the Responses API. An empty value sends nothing, which is needed for a deployment that is
+  not a reasoning model, such as `gpt-4.1`: it refuses the option. The main model's value is
+  never sent to the fallback model for the same reason.
+- **Reasoning tokens.** Each successful call also records `reasoning_tokens`
+  (`usage.output_tokens_details.reasoning_tokens` in the Responses API). They are already
+  part of `output_tokens` and of the cost, so the totals do not add them again. They show
+  how much of the output was thinking and not answer.
 
 We wrote this retry and did not use LangGraph's `RetryPolicy`. It would run the whole node
 again. It could not switch to a fallback model or record each try.

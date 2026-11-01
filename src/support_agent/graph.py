@@ -36,16 +36,19 @@ def build_graph(
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS_PER_REQUEST,
     save_record: Callable[[DecisionRecord], None] = save_decision_record,
     get_policy_version: Callable[[], str | None] = get_policy_version,
+    classifier_effort: str = "",
+    agent_effort: str = "",
 ) -> CompiledStateGraph:
     """classify -> agent <-> tools -> verify -> finalize. Out-of-scope requests, failures,
     a reached tool limit (`max_tool_calls`) and a failed check go through refuse. Every
     path ends in finalize, which saves the Decision Record with `save_record`. The record
-    names the policy version that `get_policy_version` returns.
+    names the policy version that `get_policy_version` returns. The efforts are the
+    reasoning efforts of the classify and agent calls; empty means the model's default.
     """
     graph = StateGraph(AgentState)
-    graph.add_node("classify", classify_node(llm, classifier_model))
+    graph.add_node("classify", classify_node(llm, classifier_model, classifier_effort))
     graph.add_node("refuse", refuse_node)
-    graph.add_node("agent", agent_node(llm, agent_model, tools))
+    graph.add_node("agent", agent_node(llm, agent_model, tools, agent_effort))
     graph.add_node("tools", tools_node(tools))
     graph.add_node("tool_limit_reached", partial(tool_limit_node, max_tool_calls=max_tool_calls))
     graph.add_node("verify", verify_node)

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_MAX_TOOL_CALLS_PER_REQUEST = 8
+
+# how long a reasoning model thinks before it answers. An empty string means the setting
+# is not sent, which is needed for a deployment that is not a reasoning model.
+ReasoningEffort = Literal["", "minimal", "low", "medium", "high"]
 
 
 class Settings(BaseSettings):
@@ -21,6 +27,13 @@ class Settings(BaseSettings):
     azure_openai_deployment_embedding: str
     # empty string means no fallback is configured
     model_fallback_deployment: str = ""
+
+    # one setting for each deployment, because the classifier only picks a label and
+    # needs far less thinking than the agent loop. The fallback deployment has its own
+    # setting, because it may not be a reasoning model and would refuse the option.
+    reasoning_effort_classifier: ReasoningEffort = "minimal"
+    reasoning_effort_agent: ReasoningEffort = "low"
+    reasoning_effort_fallback: ReasoningEffort = ""
 
     max_tool_calls_per_request: int = DEFAULT_MAX_TOOL_CALLS_PER_REQUEST
 

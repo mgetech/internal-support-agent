@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from types import SimpleNamespace
 from typing import Annotated, Any
 from urllib.parse import quote
 
@@ -17,6 +18,7 @@ from langchain_core.messages import AIMessage
 from tests.graph_helpers import CLASSIFIED, ScriptedLLM, call_reply, run_graph, text_reply
 from tests.test_tool_contracts import is_identity_field, property_names
 
+from support_agent import api
 from support_agent.api import app, get_graph
 from support_agent.decision_record import save_decision_record
 from support_agent.request_context import bind_request_context, get_request_context
@@ -53,6 +55,29 @@ def graph():
 @pytest.fixture
 def client(graph):
     return TestClient(app)
+
+
+def test_the_graph_is_built_with_the_reasoning_efforts_from_the_settings(monkeypatch):
+    settings = SimpleNamespace(
+        azure_openai_deployment_classifier="small",
+        azure_openai_deployment_agent="main",
+        max_tool_calls_per_request=8,
+        reasoning_effort_classifier="minimal",
+        reasoning_effort_agent="low",
+    )
+    built = {}
+    monkeypatch.setattr(api, "get_settings", lambda: settings)
+    monkeypatch.setattr(api, "get_llm_client", lambda: "client")
+    monkeypatch.setattr(api, "build_graph", lambda *args, **kwargs: built.update(kwargs))
+    get_graph.cache_clear()
+
+    try:
+        get_graph()
+    finally:
+        get_graph.cache_clear()
+
+    assert built["classifier_effort"] == "minimal"
+    assert built["agent_effort"] == "low"
 
 
 def test_chat_without_the_header_is_unauthorized(client, graph):

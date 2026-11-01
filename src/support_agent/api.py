@@ -130,6 +130,8 @@ def get_graph() -> CompiledStateGraph:
         settings.azure_openai_deployment_classifier,
         settings.azure_openai_deployment_agent,
         max_tool_calls=settings.max_tool_calls_per_request,
+        classifier_effort=settings.reasoning_effort_classifier,
+        agent_effort=settings.reasoning_effort_agent,
     )
 
 

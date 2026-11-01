@@ -106,7 +106,9 @@ def final_state(outcome="resolve", evidence=(), proposed_action_ids=()):
     }
 
 
-def model_call(model, prompt, input_tokens, output_tokens, cost_eur, latency_ms=100):
+def model_call(
+    model, prompt, input_tokens, output_tokens, cost_eur, latency_ms=100, reasoning_tokens=0
+):
     """An evidence item for a model call that worked, as the model client writes it."""
     return {
         "type": "model_call",
@@ -116,6 +118,7 @@ def model_call(model, prompt, input_tokens, output_tokens, cost_eur, latency_ms=
         "prompt": prompt,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "reasoning_tokens": reasoning_tokens,
         "cost_eur": cost_eur,
         "latency_ms": latency_ms,
     }
@@ -201,6 +204,19 @@ def test_each_model_call_in_the_record_has_its_latency():
     record = build_record(final_state(evidence=evidence))
 
     assert [call["latency_ms"] for call in record.model_calls] == [300, 1500]
+
+
+def test_each_model_call_in_the_record_has_its_reasoning_tokens():
+    evidence = [
+        model_call("small", CLASSIFIER_PROMPT, 10, 5, 0.0, reasoning_tokens=0),
+        model_call("main", AGENT_PROMPT, 10, 50, 0.0, reasoning_tokens=40),
+    ]
+
+    record = build_record(final_state(evidence=evidence))
+
+    assert [call["reasoning_tokens"] for call in record.model_calls] == [0, 40]
+    # the reasoning tokens are inside the output tokens, so they are not added again
+    assert record.total_tokens == 75
 
 
 def test_the_record_lists_each_prompt_version_that_was_used():

@@ -9,7 +9,8 @@ Every try, every switch to the fallback model and the final failure adds an evid
 item to the request and a `model_call` audit event. The item's `type` tells them apart.
 The whole chain can be read back from the Decision Record. Every try also
 carries `latency_ms`, the time the call took (the wait between tries is not counted). A
-successful try also carries its token counts and its cost in EUR.
+successful try also carries its token counts, the reasoning tokens inside the output
+tokens, and its cost in EUR.
 
 The retry rules follow the OpenAI SDK: retry on connection errors and on status 408,
 409, 429 and 5xx. The SDK's own retries are turned off, so the limit is only in this file.
@@ -64,6 +65,7 @@ class LLMClient:
         retry_delay: float = INITIAL_RETRY_DELAY,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.perf_counter,
+        fallback_reasoning_effort: str = "",
     ) -> None:
         self._client = client
         self._price_table = price_table
@@ -72,17 +74,22 @@ class LLMClient:
         self._retry_delay = retry_delay
         self._sleep = sleep
         self._clock = clock
+        self._fallback_effort = fallback_reasoning_effort
 
     def create(
         self,
         model: str,
         input: list[dict[str, Any]],
         prompt: Prompt | None = None,
+        reasoning_effort: str = "",
         **options: Any,
     ) -> Response:
         """Call `responses.create` with retry and fallback. Pass `prompt` to record its
-        id and version with every try. Other options, such as `instructions` or
-        `tools`, go to the SDK unchanged. Needs a bound request context.
+        id and version with every try. `reasoning_effort` is sent as the `reasoning`
+        option to the main model only; the fallback model uses its own setting, because
+        it may not be a reasoning model. An empty effort sends nothing. Other options,
+        such as `instructions` or `tools`, go to the SDK unchanged. Needs a bound request
+        context.
         """
         options.setdefault("store", False)
         models = [model]
@@ -93,10 +100,14 @@ class LLMClient:
         last_error: Exception | None = None
 
         for position, current in enumerate(models):
+            effort = reasoning_effort if position == 0 else self._fallback_effort
+            call_options = {**options, "reasoning": {"effort": effort}} if effort else options
             for attempt in range(1, tries + 1):
                 started = self._clock()
                 try:
-                    response = self._client.responses.create(model=current, input=input, **options)
+                    response = self._client.responses.create(
+                        model=current, input=input, **call_options
+                    )
                     if response.status == "failed":
                         raise RuntimeError(response.error.message if response.error else "failed")
                 except Exception as exc:
@@ -149,6 +160,8 @@ class LLMClient:
             usage = response.usage
             item["input_tokens"] = usage.input_tokens if usage else 0
             item["output_tokens"] = usage.output_tokens if usage else 0
+            # already counted in output_tokens and in the cost; shown to see where the time goes
+            item["reasoning_tokens"] = usage.output_tokens_details.reasoning_tokens if usage else 0
             item["cost_eur"] = call_cost_eur(
                 self._price_table, model, item["input_tokens"], item["output_tokens"]
             )
@@ -176,5 +189,8 @@ def get_llm_client() -> LLMClient:
         timeout=TIMEOUT_SECONDS,
     )
     return LLMClient(
-        client, settings.price_table_eur, fallback_model=settings.model_fallback_deployment
+        client,
+        settings.price_table_eur,
+        fallback_model=settings.model_fallback_deployment,
+        fallback_reasoning_effort=settings.reasoning_effort_fallback,
     )
