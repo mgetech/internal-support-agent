@@ -112,8 +112,9 @@ the first one.
 date. The tool counts the Monday to Friday days itself, and that number is used for the
 balance check and saved in the pending action, so the approver sees the figure that will
 be booked. It refuses an end date before the start, a start date in the past and a range
-with no working days, before it looks at the balance. Public holidays are not taken out
-yet.
+with no working days, before it looks at the balance. The German national public
+holidays are not counted (the `holidays` package); holidays that only some states have are
+not taken out.
 
 **Search.** `search_policies` joins two rankings with reciprocal rank fusion: vector
 similarity (pgvector, cosine) and Postgres full-text search. It returns the top five

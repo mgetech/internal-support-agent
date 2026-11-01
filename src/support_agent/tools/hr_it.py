@@ -9,6 +9,7 @@ import time
 from datetime import date, timedelta
 from typing import Any, Literal
 
+import holidays
 import psycopg
 from psycopg.types.json import Jsonb
 
@@ -171,11 +172,16 @@ def _propose(cur: psycopg.Cursor, tool: str, payload: dict[str, Any]) -> int:
 
 
 def calculate_working_days(start_date: date, end_date: date) -> int:
-    """The number of Monday to Friday days from start_date to end_date, both included.
-    Public holidays are not taken out.
+    """The number of Monday to Friday days from start_date to end_date, both included,
+    without the German public holidays.
     """
-    days = (end_date - start_date).days + 1
-    return sum(1 for n in range(days) if (start_date + timedelta(days=n)).weekday() < 5)
+    # national holidays only: every employee is counted as being in Germany, and holidays
+    # that only some states have (for example Epiphany in Bavaria) are not taken out
+    public_holidays = holidays.country_holidays(
+        "DE", years=range(start_date.year, end_date.year + 1)
+    )
+    days = (start_date + timedelta(days=n) for n in range((end_date - start_date).days + 1))
+    return sum(1 for day in days if day.weekday() < 5 and day not in public_holidays)
 
 
 @gated_write
@@ -183,9 +189,8 @@ def submit_leave_request(start_date: date, end_date: date) -> str:
     """Send the requester's vacation request to an approver. This does not book the
     vacation. An approver must approve it first.
 
-    The tool counts the working days itself: Monday to Friday, without weekends. Public
-    holidays are not taken out yet, so a public holiday in the range counts as a
-    working day.
+    The tool counts the working days itself: Monday to Friday, without weekends and
+    public holidays.
 
     The result has "proposed": true if the request was sent. It then has "working_days",
     the number of days that were requested. If it has "proposed": false, the request was
@@ -226,7 +231,7 @@ def _submit_leave_request(cur: psycopg.Cursor, start_date: date, end_date: date)
     if working_days == 0:
         return {
             "proposed": False,
-            "reason": "the range has no working days; it covers only a weekend",
+            "reason": "the range has no working days; it covers only weekends and public holidays",
         }
 
     year = start_date.year

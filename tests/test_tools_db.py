@@ -86,6 +86,22 @@ def test_working_days_are_monday_to_friday(start, end, expected):
     assert calculate_working_days(start, end) == expected
 
 
+def test_working_days_leave_out_both_christmas_days():
+    # in 2025 Dec 25 is a Thursday and Dec 26 a Friday: five days Monday to Friday, two holidays
+    assert calculate_working_days(date(2025, 12, 22), date(2025, 12, 26)) == 3
+    assert calculate_working_days(date(2025, 12, 25), date(2025, 12, 26)) == 0
+
+
+def test_a_public_holiday_on_a_weekend_does_not_remove_a_weekday():
+    # Dec 25 2026 is a Friday and Dec 26 a Saturday: Monday to Thursday, then Monday again
+    assert calculate_working_days(date(2026, 12, 21), date(2026, 12, 28)) == 5
+
+
+def test_a_state_holiday_still_counts_as_a_working_day():
+    # Epiphany (Jan 6) is a holiday in some states only
+    assert calculate_working_days(date(2027, 1, 6), date(2027, 1, 6)) == 1
+
+
 def test_the_tool_counts_the_working_days_itself(seeded_db):
     result = _as("emp_001", submit_leave_request, date(2026, 11, 2), date(2026, 11, 13))
 
@@ -93,6 +109,30 @@ def test_the_tool_counts_the_working_days_itself(seeded_db):
     assert result["working_days"] == 10
     payload = seeded_db.execute("SELECT payload FROM pending_actions").fetchone()[0]
     assert payload["working_days"] == 10
+
+
+def test_the_tool_leaves_out_the_public_holidays(seeded_db):
+    # Dec 25 and Dec 26 2028 are a Monday and a Tuesday: Friday to Wednesday has 4 weekdays
+    seeded_db.execute(
+        "INSERT INTO leave_balances (employee_id, year, entitlement_days)"
+        " VALUES ('emp_001', 2028, 30)"
+    )
+    result = _as("emp_001", submit_leave_request, date(2028, 12, 22), date(2028, 12, 27))
+
+    assert result["proposed"] is True
+    assert result["working_days"] == 2
+    payload = seeded_db.execute("SELECT payload FROM pending_actions").fetchone()[0]
+    assert payload["working_days"] == 2
+
+
+def test_a_range_with_only_a_public_holiday_is_refused(seeded_db):
+    result = _as("emp_001", submit_leave_request, date(2028, 12, 25), date(2028, 12, 26))
+
+    assert result == {
+        "proposed": False,
+        "reason": "the range has no working days; it covers only weekends and public holidays",
+    }
+    assert _count(seeded_db, "pending_actions") == 0
 
 
 def test_a_range_over_a_weekend_does_not_count_it(seeded_db):
@@ -117,7 +157,7 @@ def test_a_request_can_start_today(seeded_db):
         (
             date(2026, 11, 7),
             date(2026, 11, 8),
-            "the range has no working days; it covers only a weekend",
+            "the range has no working days; it covers only weekends and public holidays",
         ),
     ],
     ids=["end-before-start", "start-in-the-past", "no-working-days"],
