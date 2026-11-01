@@ -379,7 +379,7 @@ def test_a_second_decision_is_a_conflict(client, seeded_db):
 def test_approving_more_days_than_are_left_is_a_conflict_with_the_reason(client, seeded_db):
     action_id = _propose(seeded_db, "emp_001")
     seeded_db.execute(
-        "UPDATE leave_balances SET taken_days = entitlement_days - pending_days"
+        "UPDATE leave_balances SET taken_days = entitlement_days - approved_days"
         " WHERE employee_id = 'emp_001' AND year = 2026"
     )
 
@@ -846,10 +846,10 @@ def _count(conn, table: str) -> int:
     return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
 
 
-def _pending_days(conn, employee_id: str) -> float:
+def _approved_days(conn, employee_id: str) -> float:
     return float(
         conn.execute(
-            "SELECT pending_days FROM leave_balances WHERE employee_id = %s AND year = 2026",
+            "SELECT approved_days FROM leave_balances WHERE employee_id = %s AND year = 2026",
             (employee_id,),
         ).fetchone()[0]
     )
@@ -857,7 +857,7 @@ def _pending_days(conn, employee_id: str) -> float:
 
 def test_a_leave_request_needs_an_approver_before_it_is_written(client, seeded_db):
     action_id = _propose_with_tool("emp_001", "req-e2e-1", submit_leave_request, **_leave_request())
-    pending_before = _pending_days(seeded_db, "emp_001")
+    approved_before = _approved_days(seeded_db, "emp_001")
 
     # the proposal is in the queue with its payload, and nothing is written yet
     queue = client.get("/approvals", headers=_approver("emp_005")).json()
@@ -883,12 +883,12 @@ def test_a_leave_request_needs_an_approver_before_it_is_written(client, seeded_d
     assert [(r[0], str(r[1]), str(r[2]), float(r[3]), r[4]) for r in rows] == [
         ("emp_001", "2026-11-02", "2026-11-03", 2.0, "approved")
     ]
-    assert _pending_days(seeded_db, "emp_001") == pending_before + 2
+    assert _approved_days(seeded_db, "emp_001") == approved_before + 2
 
     # a second decision is refused and changes nothing
     assert _decide(client, action_id, "emp_010", "reject").status_code == 409
     assert _count(seeded_db, "leave_requests") == 1
-    assert _pending_days(seeded_db, "emp_001") == pending_before + 2
+    assert _approved_days(seeded_db, "emp_001") == approved_before + 2
     _assert_no_unapproved_writes(seeded_db)
 
 
@@ -905,12 +905,12 @@ def test_an_approver_cannot_approve_their_own_leave_request(client, seeded_db):
 
 def test_a_rejected_leave_request_writes_nothing(client, seeded_db):
     action_id = _propose_with_tool("emp_001", "req-e2e-3", submit_leave_request, **_leave_request())
-    pending_before = _pending_days(seeded_db, "emp_001")
+    approved_before = _approved_days(seeded_db, "emp_001")
 
     assert _decide(client, action_id, "emp_005", "reject").json()["status"] == "rejected"
 
     assert _count(seeded_db, "leave_requests") == 0
-    assert _pending_days(seeded_db, "emp_001") == pending_before
+    assert _approved_days(seeded_db, "emp_001") == approved_before
     assert _decide(client, action_id, "emp_010", "approve").status_code == 409
     assert _count(seeded_db, "leave_requests") == 0
     _assert_no_unapproved_writes(seeded_db)

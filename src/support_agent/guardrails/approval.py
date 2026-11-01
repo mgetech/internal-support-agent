@@ -85,7 +85,7 @@ def validate_approver(action_id: int, approver_id: str) -> None:
 
 
 def _insert_leave_request(cur: psycopg.Cursor, action: dict[str, Any]) -> dict[str, Any]:
-    """Add the approved leave request and count its days as pending in the balance.
+    """Add the approved leave request and count its days as approved in the balance.
 
     The balance can have changed since the request was proposed, so it is checked again.
     The balance row is locked first, so two approvals for the same employee run one
@@ -96,7 +96,7 @@ def _insert_leave_request(cur: psycopg.Cursor, action: dict[str, Any]) -> dict[s
     days = payload["working_days"]
     balance = cur.execute(
         """
-        SELECT entitlement_days - taken_days - pending_days AS remaining
+        SELECT entitlement_days - taken_days - approved_days AS remaining
         FROM leave_balances
         WHERE employee_id = %s AND year = %s
         FOR UPDATE
@@ -122,7 +122,7 @@ def _insert_leave_request(cur: psycopg.Cursor, action: dict[str, Any]) -> dict[s
     cur.execute(
         """
         UPDATE leave_balances
-        SET pending_days = pending_days + %s
+        SET approved_days = approved_days + %s
         WHERE employee_id = %s AND year = %s
         """,
         (days, action["employee_id"], start_date.year),

@@ -44,10 +44,10 @@ def _propose_ticket(conn, employee_id: str) -> int:
     ).fetchone()[0]
 
 
-def _pending_days(conn, employee_id: str) -> float:
+def _approved_days(conn, employee_id: str) -> float:
     return float(
         conn.execute(
-            "SELECT pending_days FROM leave_balances WHERE employee_id = %s AND year = 2026",
+            "SELECT approved_days FROM leave_balances WHERE employee_id = %s AND year = 2026",
             (employee_id,),
         ).fetchone()[0]
     )
@@ -119,7 +119,7 @@ def test_unauthorized_approver_learns_nothing_about_the_action(seeded_db):
 
 def test_approved_leave_request_is_written(seeded_db):
     action_id = _propose(seeded_db, "emp_001")
-    pending_before = _pending_days(seeded_db, "emp_001")
+    approved_before = _approved_days(seeded_db, "emp_001")
 
     assert decide(action_id, "emp_005", approve=True) == "executed"
 
@@ -130,7 +130,7 @@ def test_approved_leave_request_is_written(seeded_db):
     assert [(r[0], str(r[1]), str(r[2]), float(r[3]), r[4]) for r in rows] == [
         ("emp_001", "2026-11-02", "2026-11-02", 1.0, "approved")
     ]
-    assert _pending_days(seeded_db, "emp_001") == pending_before + 1
+    assert _approved_days(seeded_db, "emp_001") == approved_before + 1
 
 
 def test_approved_ticket_is_written(seeded_db):
@@ -147,14 +147,14 @@ def test_approved_ticket_is_written(seeded_db):
 
 def test_rejected_action_writes_nothing(seeded_db):
     action_id = _propose(seeded_db, "emp_001")
-    pending_before = _pending_days(seeded_db, "emp_001")
+    approved_before = _approved_days(seeded_db, "emp_001")
 
     assert decide(action_id, "emp_005", approve=False) == "rejected"
 
     assert _status(seeded_db, action_id) == ("rejected", "emp_005")
     assert _count(seeded_db, "leave_requests") == 0
     assert _count(seeded_db, "tickets") == 0
-    assert _pending_days(seeded_db, "emp_001") == pending_before
+    assert _approved_days(seeded_db, "emp_001") == approved_before
 
 
 @pytest.mark.parametrize(
@@ -166,20 +166,20 @@ def test_second_decision_is_rejected(first, second, seeded_db):
     action_id = _propose(seeded_db, "emp_001")
     decide(action_id, "emp_005", approve=first)
     leave_requests = _count(seeded_db, "leave_requests")
-    pending_days = _pending_days(seeded_db, "emp_001")
+    approved_days = _approved_days(seeded_db, "emp_001")
     status = _status(seeded_db, action_id)
 
     with pytest.raises(AlreadyDecidedError, match=f"already {status[0]}"):
         decide(action_id, "emp_010", approve=second)
 
     assert _count(seeded_db, "leave_requests") == leave_requests
-    assert _pending_days(seeded_db, "emp_001") == pending_days
+    assert _approved_days(seeded_db, "emp_001") == approved_days
     assert _status(seeded_db, action_id) == status
 
 
 def test_two_decisions_at_the_same_time_run_one_after_the_other(seeded_db):
     action_id = _propose(seeded_db, "emp_001")
-    pending_before = _pending_days(seeded_db, "emp_001")
+    approved_before = _approved_days(seeded_db, "emp_001")
     barrier = threading.Barrier(2)
     results: list[str] = []
 
@@ -198,7 +198,7 @@ def test_two_decisions_at_the_same_time_run_one_after_the_other(seeded_db):
 
     assert sorted(results) == ["already_decided", "executed"]
     assert _count(seeded_db, "leave_requests") == 1
-    assert _pending_days(seeded_db, "emp_001") == pending_before + 1
+    assert _approved_days(seeded_db, "emp_001") == approved_before + 1
 
 
 def test_checks_run_before_the_row_is_locked(seeded_db):
@@ -254,17 +254,17 @@ def test_approval_is_refused_when_the_balance_changed_after_the_proposal(seeded_
     action_id = _propose(seeded_db, "emp_001")
     # emp_001 had 18 days left when the request was proposed; now none are left
     seeded_db.execute(
-        "UPDATE leave_balances SET taken_days = entitlement_days - pending_days"
+        "UPDATE leave_balances SET taken_days = entitlement_days - approved_days"
         " WHERE employee_id = 'emp_001' AND year = 2026"
     )
-    pending_before = _pending_days(seeded_db, "emp_001")
+    approved_before = _approved_days(seeded_db, "emp_001")
 
     with pytest.raises(NotEnoughBalanceError, match="1 days but only 0.0 are left in 2026"):
         decide(action_id, "emp_005", approve=True)
 
     assert _status(seeded_db, action_id) == ("pending_approval", None)
     assert _count(seeded_db, "leave_requests") == 0
-    assert _pending_days(seeded_db, "emp_001") == pending_before
+    assert _approved_days(seeded_db, "emp_001") == approved_before
     assert _count(seeded_db, "audit_log") == 0
 
 
@@ -289,7 +289,7 @@ def test_approved_days_count_against_the_next_approval(seeded_db):
 
     assert _status(seeded_db, second) == ("pending_approval", None)
     assert _count(seeded_db, "leave_requests") == 1
-    assert _pending_days(seeded_db, "emp_004") == 2.0
+    assert _approved_days(seeded_db, "emp_004") == 2.0
 
 
 def test_a_request_that_exactly_uses_the_remaining_days_is_approved(seeded_db):
@@ -326,7 +326,7 @@ def test_two_approvals_for_the_same_employee_cannot_both_use_the_last_days(seede
 
     assert sorted(results) == ["executed", "not_enough_balance"]
     assert _count(seeded_db, "leave_requests") == 1
-    assert _pending_days(seeded_db, "emp_004") == 2.0
+    assert _approved_days(seeded_db, "emp_004") == 2.0
 
 
 def test_every_transition_is_audited_under_the_proposal_request(seeded_db):

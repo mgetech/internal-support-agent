@@ -20,12 +20,12 @@ from support_agent.tools.base import gated_write, record_tool_call
 def _read_leave_balance(cur: psycopg.Cursor, employee_id: str, year: int) -> dict[str, Any] | None:
     """The employee's leave balance for a year, or None if there is none. Besides the
     stored numbers it has `awaiting_approval_days`: the days of the employee's leave
-    requests that still wait for approval. The stored `pending_days` only has the days
+    requests that still wait for approval. The stored `approved_days` only has the days
     that were already approved.
     """
     return cur.execute(
         """
-        SELECT b.entitlement_days, b.taken_days, b.pending_days,
+        SELECT b.entitlement_days, b.taken_days, b.approved_days,
                (
                    SELECT coalesce(sum((a.payload->>'working_days')::numeric), 0)
                    FROM pending_actions AS a
@@ -42,13 +42,14 @@ def _read_leave_balance(cur: psycopg.Cursor, employee_id: str, year: int) -> dic
 
 def get_leave_balance(year: int = 2026) -> str:
     """Get the requester's vacation balance for a year: entitlement, days taken, days
-    approved and not taken yet ("pending_days"), days that still wait for approval
+    approved but not taken yet ("approved_days"), days that still wait for approval
     ("awaiting_approval_days") and days remaining.
 
-    "remaining_days" does not subtract the days that still wait for approval.
-    "remaining_if_all_approved" does. When "awaiting_approval_days" is more than 0, tell
-    the requester about both numbers. Use this for any question about how much leave they
-    have left.
+    "approved_days" is left out when it is 0. "remaining_days" already has the approved
+    days taken out, but not the days that still wait for approval.
+    "remaining_if_all_approved" takes those out too. When "awaiting_approval_days" is more
+    than 0, tell the requester about both numbers. Use this for any question about how
+    much leave they have left.
     """
     started_at = time.perf_counter()
     ctx = get_request_context()
@@ -63,9 +64,9 @@ def get_leave_balance(year: int = 2026) -> str:
 
     entitlement = float(row["entitlement_days"])
     taken = float(row["taken_days"])
-    pending = float(row["pending_days"])
+    approved = float(row["approved_days"])
     awaiting = float(row["awaiting_approval_days"])
-    remaining = entitlement - taken - pending
+    remaining = entitlement - taken - approved
     remaining_if_all_approved = remaining - awaiting
     record_tool_call(
         "get_leave_balance",
@@ -75,17 +76,18 @@ def get_leave_balance(year: int = 2026) -> str:
         ref,
         started_at,
     )
-    return json.dumps(
-        {
-            "year": year,
-            "entitlement_days": entitlement,
-            "taken_days": taken,
-            "pending_days": pending,
-            "awaiting_approval_days": awaiting,
-            "remaining_days": remaining,
-            "remaining_if_all_approved": remaining_if_all_approved,
-        }
-    )
+    result = {
+        "year": year,
+        "entitlement_days": entitlement,
+        "taken_days": taken,
+        "awaiting_approval_days": awaiting,
+        "remaining_days": remaining,
+        "remaining_if_all_approved": remaining_if_all_approved,
+    }
+    # left out when it is 0, so the model has one number less to explain
+    if approved:
+        result["approved_days"] = approved
+    return json.dumps(result)
 
 
 def get_known_outages() -> str:
@@ -254,11 +256,11 @@ def _submit_leave_request(cur: psycopg.Cursor, start_date: date, end_date: date)
         return {"proposed": False, "reason": f"no leave balance on record for {year}"}
 
     # the days of requests that still wait for approval are subtracted too, because
-    # pending_days only has the approved ones
+    # approved_days only has the approved ones
     remaining = float(
         balance["entitlement_days"]
         - balance["taken_days"]
-        - balance["pending_days"]
+        - balance["approved_days"]
         - balance["awaiting_approval_days"]
     )
     if working_days > remaining:

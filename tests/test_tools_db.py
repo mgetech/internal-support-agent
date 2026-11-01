@@ -176,9 +176,27 @@ def test_leave_balance_shows_the_days_that_wait_for_approval(seeded_db):
 
     assert balance["awaiting_approval_days"] == 2.0
     # the stored numbers do not change until an approver approves
-    assert balance["pending_days"] == 0.0
+    assert "approved_days" not in balance
     assert balance["remaining_days"] == 3.5
     assert balance["remaining_if_all_approved"] == 1.5
+
+
+def test_leave_balance_has_no_approved_days_when_there_are_none(seeded_db):
+    balance = _as("emp_004", get_leave_balance)
+
+    assert "approved_days" not in balance
+
+
+def test_leave_balance_shows_the_approved_days_when_there_are_some(seeded_db):
+    seeded_db.execute(
+        "UPDATE leave_balances SET approved_days = 2 WHERE employee_id = 'emp_004' AND year = 2026"
+    )
+
+    balance = _as("emp_004", get_leave_balance)
+
+    assert balance["approved_days"] == 2.0
+    # the approved days are already out of the remaining days
+    assert balance["remaining_days"] == 1.5
 
 
 def test_leave_balance_counts_only_the_own_requests_that_still_wait(seeded_db):
