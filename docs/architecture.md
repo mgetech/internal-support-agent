@@ -138,9 +138,23 @@ A write tool only adds a row to `pending_actions`. The change happens later, in
 5. **Approve.** The status becomes `approved`, the write is made, and the status becomes
    `executed`. A leave request adds a `leave_requests` row with the status `approved` and
    adds its days to `pending_days`. A ticket adds a `tickets` row.
+6. **Balance check.** Before a leave request is written, the balance row is locked and
+   the days are checked against `entitlement - taken - pending_days` once more, because
+   the balance can have changed since the proposal. If the days no longer fit,
+   `NotEnoughBalanceError` is raised (the API answers 409 with the reason). Nothing is
+   saved, the action stays pending, and the approver can reject it. The lock on the
+   balance row also makes two approvals for the same employee run one after the other.
 
 All of this runs in one transaction. If the write fails, nothing is saved and the action
 stays pending.
+
+**Leave days that wait for approval.** `pending_days` only has days that were already
+approved. A request that still waits is not in it. So `get_leave_balance` also returns
+`awaiting_approval_days` (the days of the employee's own requests in `pending_approval`)
+and `remaining_if_all_approved`. `submit_leave_request` compares the new request with
+`remaining_days - awaiting_approval_days`, so two requests that fit alone but not together
+are not both proposed. The check at approval time above is the second guard, for balances
+that change after the proposal.
 
 Every transition is audited with the approver as the actor, under the request id of the
 original proposal, so the whole story of a request is in one place. The `action_executed`

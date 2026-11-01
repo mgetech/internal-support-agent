@@ -16,20 +16,42 @@ from support_agent.request_context import get_request_context
 from support_agent.tools.base import gated_write, record_tool_call
 
 
+def _read_leave_balance(cur: psycopg.Cursor, employee_id: str, year: int) -> dict[str, Any] | None:
+    """The employee's leave balance for a year, or None if there is none. Besides the
+    stored numbers it has `awaiting_approval_days`: the days of the employee's leave
+    requests that still wait for approval. The stored `pending_days` only has the days
+    that were already approved.
+    """
+    return cur.execute(
+        """
+        SELECT b.entitlement_days, b.taken_days, b.pending_days,
+               (
+                   SELECT coalesce(sum((a.payload->>'working_days')::numeric), 0)
+                   FROM pending_actions AS a
+                   WHERE a.employee_id = b.employee_id AND a.tool = 'submit_leave_request'
+                     AND a.status = 'pending_approval'
+                     AND extract(year FROM (a.payload->>'start_date')::date) = b.year
+               ) AS awaiting_approval_days
+        FROM leave_balances AS b
+        WHERE b.employee_id = %s AND b.year = %s
+        """,
+        (employee_id, year),
+    ).fetchone()
+
+
 def get_leave_balance(year: int = 2026) -> str:
     """Get the requester's vacation balance for a year: entitlement, days taken, days
-    pending approval and days remaining. Use it for any question about how much leave
-    they have left.
+    approved and not taken yet ("pending_days"), days that still wait for approval
+    ("awaiting_approval_days") and days remaining.
+
+    "remaining_days" does not subtract the days that still wait for approval.
+    "remaining_if_all_approved" does. When "awaiting_approval_days" is more than 0, tell
+    the requester about both numbers. Use this for any question about how much leave they
+    have left.
     """
     ctx = get_request_context()
-    row = db.fetch_one(
-        """
-        SELECT entitlement_days, taken_days, pending_days
-        FROM leave_balances
-        WHERE employee_id = %s AND year = %s
-        """,
-        (ctx.employee_id, year),
-    )
+    with db.transaction() as cur:
+        row = _read_leave_balance(cur, ctx.employee_id, year)
     ref = f"leave_balances:{ctx.employee_id}:{year}"
     if row is None:
         record_tool_call("get_leave_balance", {"year": year}, f"no balance for {year}", None)
@@ -38,11 +60,14 @@ def get_leave_balance(year: int = 2026) -> str:
     entitlement = float(row["entitlement_days"])
     taken = float(row["taken_days"])
     pending = float(row["pending_days"])
+    awaiting = float(row["awaiting_approval_days"])
     remaining = entitlement - taken - pending
+    remaining_if_all_approved = remaining - awaiting
     record_tool_call(
         "get_leave_balance",
         {"year": year},
-        f"{remaining} of {entitlement} days left in {year}",
+        f"{remaining} of {entitlement} days left in {year}, "
+        f"{awaiting} awaiting approval, {remaining_if_all_approved} left if all are approved",
         ref,
     )
     return json.dumps(
@@ -51,7 +76,9 @@ def get_leave_balance(year: int = 2026) -> str:
             "entitlement_days": entitlement,
             "taken_days": taken,
             "pending_days": pending,
+            "awaiting_approval_days": awaiting,
             "remaining_days": remaining,
+            "remaining_if_all_approved": remaining_if_all_approved,
         }
     )
 
@@ -215,41 +242,24 @@ def _submit_leave_request(cur: psycopg.Cursor, start_date: date, end_date: date)
             "already_sent": True,
         }
 
-    balance = cur.execute(
-        """
-        SELECT entitlement_days, taken_days, pending_days
-        FROM leave_balances
-        WHERE employee_id = %s AND year = %s
-        """,
-        (ctx.employee_id, year),
-    ).fetchone()
+    balance = _read_leave_balance(cur, ctx.employee_id, year)
     if balance is None:
         return {"proposed": False, "reason": f"no leave balance on record for {year}"}
 
-    # also subtract the days of requests that are still waiting for approval,
-    # because pending_days only includes approved requests
-    awaiting = cur.execute(
-        """
-        SELECT coalesce(sum((payload->>'working_days')::numeric), 0) AS days
-        FROM pending_actions
-        WHERE employee_id = %s AND tool = 'submit_leave_request'
-          AND status = 'pending_approval'
-          AND extract(year FROM (payload->>'start_date')::date) = %s
-        """,
-        (ctx.employee_id, year),
-    ).fetchone()
-
+    # the days of requests that still wait for approval are subtracted too, because
+    # pending_days only has the approved ones
     remaining = float(
         balance["entitlement_days"]
         - balance["taken_days"]
         - balance["pending_days"]
-        - awaiting["days"]
+        - balance["awaiting_approval_days"]
     )
     if working_days > remaining:
         return {
             "proposed": False,
             "reason": "the request is more than the remaining balance",
             "requested_days": working_days,
+            "awaiting_approval_days": float(balance["awaiting_approval_days"]),
             "remaining_days": remaining,
         }
 

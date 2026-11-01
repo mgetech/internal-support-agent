@@ -10,7 +10,12 @@ import threading
 import pytest
 
 from support_agent import db
-from support_agent.guardrails.approval import AlreadyDecidedError, decide, validate_approver
+from support_agent.guardrails.approval import (
+    AlreadyDecidedError,
+    NotEnoughBalanceError,
+    decide,
+    validate_approver,
+)
 
 
 def _propose(conn, employee_id: str) -> int:
@@ -229,6 +234,99 @@ def test_failed_write_leaves_the_action_pending(seeded_db):
     assert _status(seeded_db, action_id) == ("pending_approval", None)
     assert _count(seeded_db, "leave_requests") == 0
     assert _count(seeded_db, "audit_log") == 0
+
+
+def _propose_days(conn, employee_id: str, start: str, days: int) -> int:
+    """Insert a pending leave request of the given length for the employee."""
+    return conn.execute(
+        """
+        INSERT INTO pending_actions (request_id, employee_id, tool, payload)
+        VALUES ('req-approval', %s, 'submit_leave_request',
+                jsonb_build_object('start_date', %s::text, 'end_date', %s::text,
+                                   'working_days', %s::int))
+        RETURNING id
+        """,
+        (employee_id, start, start, days),
+    ).fetchone()[0]
+
+
+def test_approval_is_refused_when_the_balance_changed_after_the_proposal(seeded_db):
+    action_id = _propose(seeded_db, "emp_001")
+    # emp_001 had 18 days left when the request was proposed; now none are left
+    seeded_db.execute(
+        "UPDATE leave_balances SET taken_days = entitlement_days - pending_days"
+        " WHERE employee_id = 'emp_001' AND year = 2026"
+    )
+    pending_before = _pending_days(seeded_db, "emp_001")
+
+    with pytest.raises(NotEnoughBalanceError, match="1 days but only 0.0 are left in 2026"):
+        decide(action_id, "emp_005", approve=True)
+
+    assert _status(seeded_db, action_id) == ("pending_approval", None)
+    assert _count(seeded_db, "leave_requests") == 0
+    assert _pending_days(seeded_db, "emp_001") == pending_before
+    assert _count(seeded_db, "audit_log") == 0
+
+
+def test_a_refused_approval_can_still_be_rejected(seeded_db):
+    action_id = _propose_days(seeded_db, "emp_004", "2026-11-02", 4)
+
+    with pytest.raises(NotEnoughBalanceError):
+        decide(action_id, "emp_005", approve=True)
+
+    assert decide(action_id, "emp_005", approve=False) == "rejected"
+    assert _status(seeded_db, action_id) == ("rejected", "emp_005")
+
+
+def test_approved_days_count_against_the_next_approval(seeded_db):
+    # emp_004 has 3.5 days left; two requests of 2 days were each valid when proposed
+    first = _propose_days(seeded_db, "emp_004", "2026-11-02", 2)
+    second = _propose_days(seeded_db, "emp_004", "2026-11-09", 2)
+
+    assert decide(first, "emp_005", approve=True) == "executed"
+    with pytest.raises(NotEnoughBalanceError, match="2 days but only 1.5 are left"):
+        decide(second, "emp_005", approve=True)
+
+    assert _status(seeded_db, second) == ("pending_approval", None)
+    assert _count(seeded_db, "leave_requests") == 1
+    assert _pending_days(seeded_db, "emp_004") == 2.0
+
+
+def test_a_request_that_exactly_uses_the_remaining_days_is_approved(seeded_db):
+    action_id = _propose_days(seeded_db, "emp_004", "2026-11-02", 3)
+    seeded_db.execute(
+        "UPDATE leave_balances SET taken_days = taken_days - 0.5"
+        " WHERE employee_id = 'emp_004' AND year = 2026"
+    )
+
+    assert decide(action_id, "emp_005", approve=True) == "executed"
+
+
+def test_two_approvals_for_the_same_employee_cannot_both_use_the_last_days(seeded_db):
+    first = _propose_days(seeded_db, "emp_004", "2026-11-02", 2)
+    second = _propose_days(seeded_db, "emp_004", "2026-11-09", 2)
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+
+    def run(action_id: int, approver_id: str) -> None:
+        barrier.wait()
+        try:
+            results.append(decide(action_id, approver_id, approve=True))
+        except NotEnoughBalanceError:
+            results.append("not_enough_balance")
+
+    threads = [
+        threading.Thread(target=run, args=(first, "emp_005")),
+        threading.Thread(target=run, args=(second, "emp_010")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert sorted(results) == ["executed", "not_enough_balance"]
+    assert _count(seeded_db, "leave_requests") == 1
+    assert _pending_days(seeded_db, "emp_004") == 2.0
 
 
 def test_every_transition_is_audited_under_the_proposal_request(seeded_db):

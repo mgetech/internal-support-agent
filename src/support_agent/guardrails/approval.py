@@ -21,6 +21,12 @@ class AlreadyDecidedError(Exception):
     """Raised when an action was approved, rejected or expired before this decision."""
 
 
+class NotEnoughBalanceError(Exception):
+    """Raised when an approval would give an employee more leave days than they have left.
+    The approval is not saved, so the action stays pending and the approver can reject it.
+    """
+
+
 def validate_approver_role(approver_id: str) -> None:
     """Raise PermissionError if the employee does not have an approver role."""
     approver = db.fetch_one("SELECT role FROM employees WHERE id = %s", (approver_id,))
@@ -79,10 +85,32 @@ def validate_approver(action_id: int, approver_id: str) -> None:
 
 
 def _insert_leave_request(cur: psycopg.Cursor, action: dict[str, Any]) -> dict[str, Any]:
-    """Add the approved leave request and count its days as pending in the balance."""
+    """Add the approved leave request and count its days as pending in the balance.
+
+    The balance can have changed since the request was proposed, so it is checked again.
+    The balance row is locked first, so two approvals for the same employee run one
+    after the other. Raises NotEnoughBalanceError if the days no longer fit.
+    """
     payload = action["payload"]
     start_date = date.fromisoformat(payload["start_date"])
     days = payload["working_days"]
+    balance = cur.execute(
+        """
+        SELECT entitlement_days - taken_days - pending_days AS remaining
+        FROM leave_balances
+        WHERE employee_id = %s AND year = %s
+        FOR UPDATE
+        """,
+        (action["employee_id"], start_date.year),
+    ).fetchone()
+    if balance is None:
+        # raising rolls back the approval
+        raise RuntimeError(f"no leave balance on record for {start_date.year}")
+    if days > balance["remaining"]:
+        raise NotEnoughBalanceError(
+            f"the request is for {days} days but only {float(balance['remaining'])} are left "
+            f"in {start_date.year}"
+        )
     row = cur.execute(
         """
         INSERT INTO leave_requests (employee_id, start_date, end_date, days, status)
@@ -91,7 +119,7 @@ def _insert_leave_request(cur: psycopg.Cursor, action: dict[str, Any]) -> dict[s
         """,
         (action["employee_id"], start_date, payload["end_date"], days),
     ).fetchone()
-    updated = cur.execute(
+    cur.execute(
         """
         UPDATE leave_balances
         SET pending_days = pending_days + %s
@@ -99,9 +127,6 @@ def _insert_leave_request(cur: psycopg.Cursor, action: dict[str, Any]) -> dict[s
         """,
         (days, action["employee_id"], start_date.year),
     )
-    if updated.rowcount != 1:
-        # raising rolls back the insert and the approval
-        raise RuntimeError(f"no leave balance on record for {start_date.year}")
     return {"table": "leave_requests", "id": row["id"]}
 
 
@@ -140,7 +165,8 @@ def decide(action_id: int, approver_id: str, approve: bool) -> str:
     AlreadyDecidedError. An approval makes the write and marks the action executed. A
     rejection writes nothing. Every transition is audited under the request that made the
     proposal, with the approver as the actor. If the write fails, nothing is saved and
-    the action stays pending.
+    the action stays pending. A leave request is checked against the balance again before
+    it is written, and NotEnoughBalanceError is raised if the days no longer fit.
     """
     validate_approver(action_id, approver_id)
 

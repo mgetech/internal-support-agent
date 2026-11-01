@@ -125,12 +125,61 @@ def test_over_balance_is_refused_by_the_tool(seeded_db):
 
 
 def test_waiting_requests_are_subtracted_from_the_balance(seeded_db):
+    # emp_004 has 3.5 days left: each request fits alone, but the two together do not
     first = _as("emp_004", submit_leave_request, date(2026, 11, 2), date(2026, 11, 3))
     second = _as("emp_004", submit_leave_request, date(2026, 11, 9), date(2026, 11, 10))
 
     assert first["proposed"] is True
     assert second["proposed"] is False
+    assert second["requested_days"] == 2
+    assert second["awaiting_approval_days"] == 2.0
     assert second["remaining_days"] == 1.5
+    assert _count(seeded_db, "pending_actions") == 1
+
+
+def test_a_request_that_fits_next_to_the_waiting_ones_is_proposed(seeded_db):
+    _as("emp_004", submit_leave_request, date(2026, 11, 2), date(2026, 11, 3))
+
+    second = _as("emp_004", submit_leave_request, date(2026, 11, 9), date(2026, 11, 9))
+
+    assert second["proposed"] is True
+    assert second["remaining_after_approval"] == 0.5
+
+
+def test_leave_balance_without_waiting_requests(seeded_db):
+    balance = _as("emp_004", get_leave_balance)
+
+    assert balance["awaiting_approval_days"] == 0.0
+    assert balance["remaining_days"] == 3.5
+    assert balance["remaining_if_all_approved"] == 3.5
+
+
+def test_leave_balance_shows_the_days_that_wait_for_approval(seeded_db):
+    _as("emp_004", submit_leave_request, date(2026, 11, 2), date(2026, 11, 3))
+
+    balance = _as("emp_004", get_leave_balance)
+
+    assert balance["awaiting_approval_days"] == 2.0
+    # the stored numbers do not change until an approver approves
+    assert balance["pending_days"] == 0.0
+    assert balance["remaining_days"] == 3.5
+    assert balance["remaining_if_all_approved"] == 1.5
+
+
+def test_leave_balance_counts_only_the_own_requests_that_still_wait(seeded_db):
+    _as("emp_004", submit_leave_request, date(2026, 11, 2), date(2026, 11, 3))
+    _as("emp_001", submit_leave_request, date(2026, 11, 2), date(2026, 11, 6))
+
+    # the five days of emp_001 are not counted for emp_004
+    assert _as("emp_004", get_leave_balance)["awaiting_approval_days"] == 2.0
+    assert _as("emp_001", get_leave_balance)["awaiting_approval_days"] == 5.0
+
+    seeded_db.execute(
+        "UPDATE pending_actions SET status = 'rejected' WHERE employee_id = 'emp_001'"
+    )
+
+    # a rejected request does not wait any more
+    assert _as("emp_001", get_leave_balance)["awaiting_approval_days"] == 0.0
 
 
 def test_duplicate_leave_request_returns_the_same_id(seeded_db):

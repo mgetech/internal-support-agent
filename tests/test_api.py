@@ -351,6 +351,22 @@ def test_a_second_decision_is_a_conflict(client, seeded_db):
     assert seeded_db.execute("SELECT count(*) FROM leave_requests").fetchone()[0] == 1
 
 
+def test_approving_more_days_than_are_left_is_a_conflict_with_the_reason(client, seeded_db):
+    action_id = _propose(seeded_db, "emp_001")
+    seeded_db.execute(
+        "UPDATE leave_balances SET taken_days = entitlement_days - pending_days"
+        " WHERE employee_id = 'emp_001' AND year = 2026"
+    )
+
+    response = client.post(
+        f"/approvals/{action_id}", json={"decision": "approve"}, headers=_approver("emp_005")
+    )
+
+    assert response.status_code == 409
+    assert "only 0.0 are left in 2026" in response.json()["detail"]
+    assert seeded_db.execute("SELECT count(*) FROM leave_requests").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize(
     "body",
     [{}, {"decision": "maybe"}, {"decision": "approve", "approver_id": "emp_010"}],
