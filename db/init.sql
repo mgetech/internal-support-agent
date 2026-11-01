@@ -19,7 +19,7 @@ CREATE TABLE leave_balances (
     year INT NOT NULL,
     entitlement_days NUMERIC NOT NULL,
     taken_days NUMERIC NOT NULL DEFAULT 0,
-    pending_days NUMERIC NOT NULL DEFAULT 0,
+    approved_days NUMERIC NOT NULL DEFAULT 0,
     PRIMARY KEY (employee_id, year)
 );
 

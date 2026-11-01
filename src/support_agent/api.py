@@ -25,6 +25,7 @@ from support_agent.feedback import Rating, create_feedback
 from support_agent.graph import build_graph
 from support_agent.guardrails.approval import (
     AlreadyDecidedError,
+    NotEnoughBalanceError,
     decide,
     get_own_actions,
     get_pending_actions,
@@ -129,6 +130,8 @@ def get_graph() -> CompiledStateGraph:
         settings.azure_openai_deployment_classifier,
         settings.azure_openai_deployment_agent,
         max_tool_calls=settings.max_tool_calls_per_request,
+        classifier_effort=settings.reasoning_effort_classifier,
+        agent_effort=settings.reasoning_effort_agent,
     )
 
 
@@ -183,7 +186,7 @@ def create_approval(
         raise HTTPException(status_code=403, detail=str(error)) from error
     except LookupError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
-    except AlreadyDecidedError as error:
+    except (AlreadyDecidedError, NotEnoughBalanceError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     return ApprovalResponse(action_id=action_id, status=status)
 

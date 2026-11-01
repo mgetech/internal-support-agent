@@ -22,6 +22,38 @@ def test_defaults_when_only_required_fields_given():
     assert settings.retention_days_decisions == 1095
     assert settings.retention_days_audit == 1095
     assert settings.price_table_eur == {}
+    assert settings.reasoning_effort_classifier == "minimal"
+    assert settings.reasoning_effort_agent == "low"
+    assert settings.reasoning_effort_fallback == ""
+
+
+def test_reasoning_effort_can_be_set_for_each_deployment(monkeypatch):
+    monkeypatch.setenv("REASONING_EFFORT_CLASSIFIER", "low")
+    monkeypatch.setenv("REASONING_EFFORT_AGENT", "high")
+    monkeypatch.setenv("REASONING_EFFORT_FALLBACK", "medium")
+
+    settings = Settings(_env_file=None, **REQUIRED)
+
+    assert settings.reasoning_effort_classifier == "low"
+    assert settings.reasoning_effort_agent == "high"
+    assert settings.reasoning_effort_fallback == "medium"
+
+
+def test_reasoning_effort_can_be_turned_off_with_an_empty_value(monkeypatch):
+    monkeypatch.setenv("REASONING_EFFORT_CLASSIFIER", "")
+    monkeypatch.setenv("REASONING_EFFORT_AGENT", "")
+
+    settings = Settings(_env_file=None, **REQUIRED)
+
+    assert settings.reasoning_effort_classifier == ""
+    assert settings.reasoning_effort_agent == ""
+
+
+def test_an_unknown_reasoning_effort_is_refused(monkeypatch):
+    monkeypatch.setenv("REASONING_EFFORT_AGENT", "extreme")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **REQUIRED)
 
 
 def test_missing_required_field_raises():

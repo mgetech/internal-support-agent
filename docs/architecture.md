@@ -112,8 +112,9 @@ the first one.
 date. The tool counts the Monday to Friday days itself, and that number is used for the
 balance check and saved in the pending action, so the approver sees the figure that will
 be booked. It refuses an end date before the start, a start date in the past and a range
-with no working days, before it looks at the balance. Public holidays are not taken out
-yet.
+with no working days, before it looks at the balance. The German national public
+holidays are not counted (the `holidays` package); holidays that only some states have are
+not taken out.
 
 **Search.** `search_policies` joins two rankings with reciprocal rank fusion: vector
 similarity (pgvector, cosine) and Postgres full-text search. It returns the top five
@@ -137,10 +138,25 @@ A write tool only adds a row to `pending_actions`. The change happens later, in
 4. **Reject.** The status becomes `rejected`. Nothing else is written.
 5. **Approve.** The status becomes `approved`, the write is made, and the status becomes
    `executed`. A leave request adds a `leave_requests` row with the status `approved` and
-   adds its days to `pending_days`. A ticket adds a `tickets` row.
+   adds its days to `approved_days`. A ticket adds a `tickets` row.
+6. **Balance check.** Before a leave request is written, the balance row is locked and
+   the days are checked against `entitlement - taken - approved_days` once more, because
+   the balance can have changed since the proposal. If the days no longer fit,
+   `NotEnoughBalanceError` is raised (the API answers 409 with the reason). Nothing is
+   saved, the action stays pending, and the approver can reject it. The lock on the
+   balance row also makes two approvals for the same employee run one after the other.
 
 All of this runs in one transaction. If the write fails, nothing is saved and the action
 stays pending.
+
+**Leave days that wait for approval.** `approved_days` only has days that were already
+approved. A request that still waits is not in it. So `get_leave_balance` also returns
+`awaiting_approval_days` (the days of the employee's own requests in `pending_approval`)
+and `remaining_if_all_approved`. The tool shows `approved_days` to the model
+only when it is more than zero. `submit_leave_request` compares the new request with
+`remaining_days - awaiting_approval_days`, so two requests that fit alone but not together
+are not both proposed. The check at approval time above is the second guard, for balances
+that change after the proposal.
 
 Every transition is audited with the approver as the actor, under the request id of the
 original proposal, so the whole story of a request is in one place. The `action_executed`
@@ -191,6 +207,10 @@ stub, so the API tests need no model keys.
 
 - **Tabs.** Chat, My requests, Approvals and Decision records. Only the open tab runs, so
   the chat does not fetch the queue on every message.
+- **My requests.** It lists every proposal of the selected employee with a status badge:
+  the ones waiting for approval first, then the history, each newest first. It asks for 200
+  actions, the most the API gives, and says so when the list is cut there. The order is made
+  in the UI, so `GET /me/actions` stays plain newest first.
 - **Employee selector.** It sets the `X-Employee-Id` header, so it is the login stub made
   visible. The API has no route that lists employees, and a real deployment would have none
   either, so the roster is a copy in the file. A test compares it with the seeded
@@ -281,7 +301,8 @@ Every request that reaches the end of the graph saves one row in `decision_recor
   wording, so no model writes it
 - the evidence in order, and the citations of the final answer
 - the policy version, the prompt versions and every check result
-- each model call with tokens and cost in euros, the totals, and the time taken
+- each model call with tokens, cost in euros and time taken, the totals, and the time the
+  whole request took
 - the trace id, which is empty because tracing is not built yet
 
 The record and the final `decision_recorded` audit event are saved in one transaction.
@@ -350,6 +371,23 @@ Azure OpenAI.
   evidence item, so the fallback chain can be read from the record alone.
 - **Cost.** Each successful call gets its token counts and its cost in euros from a price
   table in the settings. Creating the client fails if a model has no price.
+- **Latency.** Every try has `latency_ms`, the time of that one call. The wait between
+  tries is not counted. Failed tries have it too, because a slow failure is also useful to
+  know. Every tool result in the evidence has `latency_ms` as well. It runs from the start
+  of the tool to the moment the result is recorded, so the commit of a proposal and the
+  last read of a policy search are not in it.
+- **Reasoning effort.** How long a reasoning model thinks is a setting for each
+  deployment: `REASONING_EFFORT_CLASSIFIER` (default `minimal`), `REASONING_EFFORT_AGENT`
+  (default `low`) and `REASONING_EFFORT_FALLBACK` (default empty). The classifier only picks
+  a label, so it needs very little thinking, and the agent loop makes several calls per
+  request, so every call counts. The client sends the value as the `reasoning` option of
+  the Responses API. An empty value sends nothing, which is needed for a deployment that is
+  not a reasoning model, such as `gpt-4.1`: it refuses the option. The main model's value is
+  never sent to the fallback model for the same reason.
+- **Reasoning tokens.** Each successful call also records `reasoning_tokens`
+  (`usage.output_tokens_details.reasoning_tokens` in the Responses API). They are already
+  part of `output_tokens` and of the cost, so the totals do not add them again. They show
+  how much of the output was thinking and not answer.
 
 We wrote this retry and did not use LangGraph's `RetryPolicy`. It would run the whole node
 again. It could not switch to a fallback model or record each try.
@@ -369,14 +407,25 @@ Version 1.1.0 follows from that:
   approves it, and that approval is the confirmation.
 - When something is missing, the agent says what is missing and asks for the full request
   again in one message. It never asks a question and waits.
-- It tells the employee to contact their HR or IT team directly, and does not offer to
-  connect anyone or change a request that was already sent, because it has no tool for
-  that. It does not invite a reply.
+- It does not offer to connect anyone or change a request that was already sent, because
+  it has no tool for that. It does not invite a reply.
 
 Version 1.0.0 offered a human in every answer, so it wrote things like "tell me and I can
 get a human to adjust it". The employee then answered in the next message, to an agent
 with no memory of the first one. The chat tab also says that each message is handled on
 its own.
+
+Version 1.2.0 stops the agent from inventing advice and from repeating the handoff line:
+
+- Steps and workarounds must come from a tool result or a cited policy. Without a source
+  the agent says that the relevant team can advise. It never suggests a way around a
+  security control such as the VPN.
+- Before it proposes a ticket or a leave request, the agent searches the policies for rules
+  that apply, for example the approval a software license needs because of its cost, and
+  mentions them with a citation.
+- It mentions contacting HR or IT only when it escalates, refuses or cannot handle the
+  request. The banner in the UI already gives the general reminder, so version 1.1.0's
+  line at the end of every answer is gone.
 
 The agent is not told today's date, so a date without a year can make it ask for the year.
 

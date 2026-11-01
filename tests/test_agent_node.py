@@ -40,6 +40,23 @@ def test_the_agent_sends_the_system_prompt_and_the_tool_belt():
     assert all(tool["type"] == "function" and tool["strict"] is False for tool in call["tools"])
 
 
+def test_the_agent_call_uses_the_agent_effort_and_the_classifier_call_its_own():
+    llm = ScriptedLLM(CLASSIFIED, text_reply("done"))
+
+    run_graph(llm, classifier_effort="minimal", agent_effort="low")
+
+    assert llm.calls[0]["reasoning_effort"] == "minimal"
+    assert llm.calls[1]["reasoning_effort"] == "low"
+
+
+def test_without_an_effort_the_calls_ask_for_none():
+    llm = ScriptedLLM(CLASSIFIED, text_reply("done"))
+
+    run_graph(llm)
+
+    assert [call["reasoning_effort"] for call in llm.calls] == ["", ""]
+
+
 def test_the_real_tool_belt_has_no_identity_parameter_in_its_schemas():
     llm = ScriptedLLM(CLASSIFIED, text_reply("done"))
     graph = build_graph(

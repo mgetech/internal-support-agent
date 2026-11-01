@@ -71,9 +71,12 @@ def _get_last_user_text(state: AgentState) -> str:
     raise ValueError("the state has no user message")
 
 
-def classify_node(llm: LLMClient, model: str) -> Callable[[AgentState], dict[str, Any]]:
-    """The classify node. One constrained call to `model`, the small deployment. A model
-    outage or an answer that does not fit the schema ends in escalate: no guessing.
+def classify_node(
+    llm: LLMClient, model: str, reasoning_effort: str = ""
+) -> Callable[[AgentState], dict[str, Any]]:
+    """The classify node. One constrained call to `model`, the small deployment, with the
+    given reasoning effort. A model outage or an answer that does not fit the schema ends
+    in escalate: no guessing.
     """
     prompt = get_prompt("classifier")
 
@@ -87,6 +90,7 @@ def classify_node(llm: LLMClient, model: str) -> Callable[[AgentState], dict[str
                 prompt,
                 instructions=prompt.text,
                 text={"format": CLASSIFICATION_FORMAT},
+                reasoning_effort=reasoning_effort,
             )
             result = Classification.model_validate_json(response.output_text)
         except LLMUnavailableError:
@@ -168,10 +172,11 @@ def _to_ai_message(response: Response) -> AIMessage:
 
 
 def agent_node(
-    llm: LLMClient, model: str, tools: Sequence[Tool]
+    llm: LLMClient, model: str, tools: Sequence[Tool], reasoning_effort: str = ""
 ) -> Callable[[AgentState], dict[str, Any]]:
-    """The agent node: one model call with the tool belt. The reply may ask for tool
-    calls. A model outage, or tool arguments that are not valid JSON, ends in escalate.
+    """The agent node: one model call with the tool belt and the given reasoning effort.
+    The reply may ask for tool calls. A model outage, or tool arguments that are not valid
+    JSON, ends in escalate.
     """
     prompt = get_prompt("agent_system")
     # the Responses API treats a tool as strict unless told otherwise
@@ -193,6 +198,7 @@ def agent_node(
                 prompt,
                 instructions=prompt.text,
                 tools=tool_schemas,
+                reasoning_effort=reasoning_effort,
             )
             message = _to_ai_message(response)
         except LLMUnavailableError:

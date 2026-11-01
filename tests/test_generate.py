@@ -23,7 +23,7 @@ def _balance(employee_id: str) -> dict:
 
 
 def _remaining(balance: dict) -> float:
-    return balance["entitlement_days"] - balance["taken_days"] - balance["pending_days"]
+    return balance["entitlement_days"] - balance["taken_days"] - balance["approved_days"]
 
 
 def test_twelve_employees_with_unique_sequential_ids():

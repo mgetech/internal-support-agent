@@ -17,6 +17,8 @@ API_URL = os.environ.get("API_URL", "http://localhost:8000")
 # the model can take a while to answer
 CHAT_TIMEOUT_SECONDS = 120
 REQUEST_TIMEOUT_SECONDS = 10
+# the most that GET /me/actions returns in one answer
+MY_ACTIONS_LIMIT = 200
 
 # The selector stands in for an identity provider; a real deployment has no employee list.
 EMPLOYEES = {
@@ -106,9 +108,12 @@ def get_approvals(employee_id: str) -> list[dict[str, Any]]:
 
 
 def get_my_actions(employee_id: str) -> list[dict[str, Any]]:
-    """The selected employee's own actions, in any status."""
+    """The selected employee's own actions, in any status, newest first. It asks for the
+    most the API gives in one answer.
+    """
     response = httpx.get(
         f"{API_URL}/me/actions",
+        params={"limit": MY_ACTIONS_LIMIT},
         headers={"X-Employee-Id": employee_id},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
@@ -338,6 +343,29 @@ def show_chat_tab(employee_id: str) -> None:
     st.rerun()
 
 
+def split_actions(
+    actions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The actions that wait for approval, and all the others. Each list is newest first."""
+    newest_first = sorted(actions, key=lambda action: action["id"], reverse=True)
+    waiting = [action for action in newest_first if action["status"] == "pending_approval"]
+    history = [action for action in newest_first if action["status"] != "pending_approval"]
+    return waiting, history
+
+
+def show_action(action: dict[str, Any]) -> None:
+    label, color = ACTION_STATUS_BADGES.get(action["status"], (action["status"], "gray"))
+    with st.container(border=True):
+        st.markdown(f"**#{action['id']} · {action['tool']}**")
+        st.badge(label, color=color)
+        st.caption(f"Requested at {format_time(action['created_at'])}")
+        if action["decided_by"]:
+            approver_name = EMPLOYEES.get(action["decided_by"], ("unknown",))[0]
+            decided_at = format_time(action["decided_at"])
+            st.caption(f"Decided by {approver_name} ({action['decided_by']}) at {decided_at}")
+        st.json(action["payload"])
+
+
 def show_requests_tab(employee_id: str) -> None:
     st.button("Refresh", icon=":material/refresh:", key="refresh_requests")
 
@@ -350,17 +378,17 @@ def show_requests_tab(employee_id: str) -> None:
         st.info("You have no requests yet. Ask the agent for leave or a ticket in the chat.")
         return
 
-    for action in actions:
-        label, color = ACTION_STATUS_BADGES.get(action["status"], (action["status"], "gray"))
-        with st.container(border=True):
-            st.markdown(f"**#{action['id']} · {action['tool']}**")
-            st.badge(label, color=color)
-            st.caption(f"Requested at {format_time(action['created_at'])}")
-            if action["decided_by"]:
-                approver_name = EMPLOYEES.get(action["decided_by"], ("unknown",))[0]
-                decided_at = format_time(action["decided_at"])
-                st.caption(f"Decided by {approver_name} ({action['decided_by']}) at {decided_at}")
-            st.json(action["payload"])
+    waiting, history = split_actions(actions)
+    if waiting:
+        st.subheader(f"Waiting for approval ({len(waiting)})")
+        for action in waiting:
+            show_action(action)
+    if history:
+        st.subheader("History")
+        for action in history:
+            show_action(action)
+    if len(actions) == MY_ACTIONS_LIMIT:
+        st.caption(f"Only the newest {MY_ACTIONS_LIMIT} requests are shown.")
 
 
 def show_approvals_tab(employee_id: str) -> None:

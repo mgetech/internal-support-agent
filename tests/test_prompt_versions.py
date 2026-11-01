@@ -157,3 +157,26 @@ def test_agent_prompt_proposes_without_asking_and_never_invites_a_reply():
     assert "Never invite a reply" in text
     assert "never offer to" in text
     assert "ask the employee to send the full request again in one message" in text
+
+
+def test_agent_prompt_gives_steps_only_from_a_source():
+    text = " ".join(load_prompts()["agent_system"].text.split())
+
+    assert "steps or workarounds only if they come from a tool result or a cited policy" in text
+    assert "say that the relevant team can advise" in text
+    assert "Never suggest a way around a security control, such as the VPN" in text
+
+
+def test_agent_prompt_checks_the_policies_before_a_proposal():
+    text = " ".join(load_prompts()["agent_system"].text.split())
+
+    assert "Before you propose a ticket or a leave request, search the policies" in text
+    assert "Mention these rules with a citation" in text
+
+
+def test_agent_prompt_mentions_hr_or_it_only_when_it_cannot_help():
+    text = " ".join(load_prompts()["agent_system"].text.split())
+
+    assert "only when you escalate, when you refuse, or when you cannot handle" in text
+    assert "the app already shows that reminder" in text
+    assert "Always tell the employee" not in text

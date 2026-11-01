@@ -57,7 +57,7 @@ class _EmployeeProfile:
     country: str
     hired_at: date
     taken_days: float
-    pending_days: float = 0.0
+    approved_days: float = 0.0
 
 
 # the planted edge cases: emp_001 happy path, emp_003 part-time proration,
@@ -129,7 +129,7 @@ def generate_leave_balances(year: int = YEAR) -> list[dict]:
             "year": year,
             "entitlement_days": _entitlement_days(p.hired_at, p.employment_type, p.weekly_hours),
             "taken_days": p.taken_days,
-            "pending_days": p.pending_days,
+            "approved_days": p.approved_days,
         }
         for p in _PROFILES
     ]
@@ -260,7 +260,7 @@ def embed_policy_chunks(
 
 
 _EMPLOYEE_COLUMNS = ["id", "name", "role", "employment_type", "weekly_hours", "country", "hired_at"]
-_LEAVE_BALANCE_COLUMNS = ["employee_id", "year", "entitlement_days", "taken_days", "pending_days"]
+_LEAVE_BALANCE_COLUMNS = ["employee_id", "year", "entitlement_days", "taken_days", "approved_days"]
 _OUTAGE_COLUMNS = ["system", "status", "started_at", "note"]
 _POLICY_CHUNK_COLUMNS = [
     "id",

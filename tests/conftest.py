@@ -110,8 +110,8 @@ def seeded_db(clean_db):
     for b in generate_leave_balances():
         clean_db.execute(
             "INSERT INTO leave_balances (employee_id, year, entitlement_days, taken_days,"
-            " pending_days) VALUES (%(employee_id)s, %(year)s, %(entitlement_days)s,"
-            " %(taken_days)s, %(pending_days)s)",
+            " approved_days) VALUES (%(employee_id)s, %(year)s, %(entitlement_days)s,"
+            " %(taken_days)s, %(approved_days)s)",
             b,
         )
     for o in generate_known_outages():

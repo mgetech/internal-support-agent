@@ -35,7 +35,8 @@ def call_cost_eur(
 
 
 def model_calls(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The successful model calls in a request's evidence, with model, tokens and cost.
+    """The successful model calls in a request's evidence, with model, tokens, cost and latency.
+    `reasoning_tokens` is part of `output_tokens`, so it is not added to the totals again.
     Failed tries are left out because they have no tokens and no cost.
     """
     return [
@@ -43,7 +44,9 @@ def model_calls(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "model": item["model"],
             "input_tokens": item["input_tokens"],
             "output_tokens": item["output_tokens"],
+            "reasoning_tokens": item["reasoning_tokens"],
             "cost_eur": item["cost_eur"],
+            "latency_ms": item["latency_ms"],
         }
         for item in evidence
         if item["type"] == "model_call" and item["status"] == "ok"

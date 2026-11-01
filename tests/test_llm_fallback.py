@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 
 import httpx
@@ -40,13 +41,17 @@ def connection_error():
     return openai.APIConnectionError(request=_REQUEST)
 
 
-def answer(text="hello", input_tokens=5, output_tokens=2, status="completed"):
+def answer(text="hello", input_tokens=5, output_tokens=2, reasoning_tokens=0, status="completed"):
     return SimpleNamespace(
         status=status,
         error=None,
         output_text=text,
         output=[],
-        usage=SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens),
+        usage=SimpleNamespace(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            output_tokens_details=SimpleNamespace(reasoning_tokens=reasoning_tokens),
+        ),
     )
 
 
@@ -84,13 +89,27 @@ def sleeps():
     return []
 
 
-def run(responses, sleeps, fallback_model="", **options):
+def run(
+    responses,
+    sleeps,
+    fallback_model="",
+    clock=time.perf_counter,
+    fallback_reasoning_effort="",
+    **options,
+):
     """Run one call in a bound request. `responses` is what the fake client returns
     or raises on each call. Returns the fake client, the result (a response or the
     LLMUnavailableError) and the request's evidence.
     """
     fake = FakeOpenAI(responses)
-    client = LLMClient(fake, PRICES, fallback_model=fallback_model, sleep=sleeps.append)
+    client = LLMClient(
+        fake,
+        PRICES,
+        fallback_model=fallback_model,
+        sleep=sleeps.append,
+        clock=clock,
+        fallback_reasoning_effort=fallback_reasoning_effort,
+    )
     with bind_request_context("emp_001", "req-1", "rest") as ctx:
         try:
             result = client.create("main", [{"role": "user", "content": "hi"}], PROMPT, **options)
@@ -122,6 +141,98 @@ def test_successful_call_carries_tokens_and_cost(audit_events, sleeps):
     assert evidence[0]["input_tokens"] == 1000
     assert evidence[0]["output_tokens"] == 500
     assert evidence[0]["cost_eur"] == pytest.approx(0.002)
+
+
+def test_successful_call_carries_its_reasoning_tokens_inside_the_output_tokens(
+    audit_events, sleeps
+):
+    _, _, evidence = run(
+        [answer(input_tokens=1000, output_tokens=500, reasoning_tokens=300)], sleeps
+    )
+
+    assert evidence[0]["reasoning_tokens"] == 300
+    # the cost is the same as without the reasoning detail: 1 * 0.001 + 0.5 * 0.002
+    assert evidence[0]["output_tokens"] == 500
+    assert evidence[0]["cost_eur"] == pytest.approx(0.002)
+    assert request_total_cost(evidence).tokens == 1500
+
+
+def test_a_response_without_usage_has_zero_reasoning_tokens(audit_events, sleeps):
+    response = answer()
+    response.usage = None
+
+    _, _, evidence = run([response], sleeps)
+
+    assert evidence[0]["reasoning_tokens"] == 0
+
+
+def test_the_effort_is_sent_as_the_reasoning_option(audit_events, sleeps):
+    fake, _, _ = run([answer()], sleeps, reasoning_effort="low")
+
+    assert fake.calls[0]["reasoning"] == {"effort": "low"}
+    assert "reasoning_effort" not in fake.calls[0]
+
+
+def test_an_empty_effort_sends_no_reasoning_option(audit_events, sleeps):
+    fake, _, _ = run([answer()], sleeps)
+
+    assert "reasoning" not in fake.calls[0]
+
+
+def test_every_try_on_the_main_model_has_the_effort(audit_events, sleeps):
+    fake, _, _ = run([rate_limited(), answer()], sleeps, reasoning_effort="minimal")
+
+    assert [call["reasoning"] for call in fake.calls] == [{"effort": "minimal"}] * 2
+
+
+def test_the_fallback_model_does_not_get_the_main_effort(audit_events, sleeps):
+    # the fallback may not be a reasoning model, and it would refuse the option
+    fake, _, _ = run(
+        [unauthorized(), answer()], sleeps, fallback_model="backup", reasoning_effort="low"
+    )
+
+    assert fake.models == ["main", "backup"]
+    assert fake.calls[0]["reasoning"] == {"effort": "low"}
+    assert "reasoning" not in fake.calls[1]
+
+
+def test_the_fallback_model_gets_the_effort_of_its_own_setting(audit_events, sleeps):
+    fake, _, _ = run(
+        [unauthorized(), answer()],
+        sleeps,
+        fallback_model="backup",
+        fallback_reasoning_effort="high",
+        reasoning_effort="low",
+    )
+
+    assert fake.calls[1]["reasoning"] == {"effort": "high"}
+
+
+def _clock(*times):
+    """A clock that returns the given times one after the other, in seconds."""
+    readings = iter(times)
+    return lambda: next(readings)
+
+
+def test_successful_call_carries_its_latency(audit_events, sleeps):
+    # the clock is read when the call starts and when it ends
+    _, _, evidence = run([answer()], sleeps, clock=_clock(10.0, 10.25))
+
+    assert evidence[0]["latency_ms"] == 250
+
+
+def test_every_try_has_its_own_latency_and_the_wait_is_not_counted(audit_events, sleeps):
+    clock = _clock(0.0, 0.5, 100.0, 100.125)
+    _, _, evidence = run([rate_limited(), answer()], sleeps, clock=clock)
+
+    assert [item["status"] for item in evidence] == ["retryable_error", "ok"]
+    assert [item["latency_ms"] for item in evidence] == [500, 125]
+
+
+def test_latency_is_in_the_audit_event_too(audit_events, sleeps):
+    run([answer()], sleeps, clock=_clock(0.0, 0.3))
+
+    assert audit_events[0]["latency_ms"] == 300
 
 
 @pytest.mark.parametrize("make_error", [rate_limited, server_error, connection_error])
@@ -313,3 +424,10 @@ def test_get_llm_client_fails_at_startup_when_a_price_is_missing(monkeypatch):
 
     with pytest.raises(ValueError, match="no price for: backup"):
         llm.get_llm_client()
+
+
+def test_get_llm_client_takes_the_fallback_effort_from_the_settings(monkeypatch):
+    settings = Settings(_env_file=None, **SETTINGS, reasoning_effort_fallback="medium")
+    monkeypatch.setattr(llm, "get_settings", lambda: settings)
+
+    assert llm.get_llm_client()._fallback_effort == "medium"

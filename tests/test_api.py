@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from types import SimpleNamespace
 from typing import Annotated, Any
 from urllib.parse import quote
 
@@ -17,6 +18,7 @@ from langchain_core.messages import AIMessage
 from tests.graph_helpers import CLASSIFIED, ScriptedLLM, call_reply, run_graph, text_reply
 from tests.test_tool_contracts import is_identity_field, property_names
 
+from support_agent import api
 from support_agent.api import app, get_graph
 from support_agent.decision_record import save_decision_record
 from support_agent.request_context import bind_request_context, get_request_context
@@ -53,6 +55,29 @@ def graph():
 @pytest.fixture
 def client(graph):
     return TestClient(app)
+
+
+def test_the_graph_is_built_with_the_reasoning_efforts_from_the_settings(monkeypatch):
+    settings = SimpleNamespace(
+        azure_openai_deployment_classifier="small",
+        azure_openai_deployment_agent="main",
+        max_tool_calls_per_request=8,
+        reasoning_effort_classifier="minimal",
+        reasoning_effort_agent="low",
+    )
+    built = {}
+    monkeypatch.setattr(api, "get_settings", lambda: settings)
+    monkeypatch.setattr(api, "get_llm_client", lambda: "client")
+    monkeypatch.setattr(api, "build_graph", lambda *args, **kwargs: built.update(kwargs))
+    get_graph.cache_clear()
+
+    try:
+        get_graph()
+    finally:
+        get_graph.cache_clear()
+
+    assert built["classifier_effort"] == "minimal"
+    assert built["agent_effort"] == "low"
 
 
 def test_chat_without_the_header_is_unauthorized(client, graph):
@@ -349,6 +374,22 @@ def test_a_second_decision_is_a_conflict(client, seeded_db):
 
     assert response.status_code == 409
     assert seeded_db.execute("SELECT count(*) FROM leave_requests").fetchone()[0] == 1
+
+
+def test_approving_more_days_than_are_left_is_a_conflict_with_the_reason(client, seeded_db):
+    action_id = _propose(seeded_db, "emp_001")
+    seeded_db.execute(
+        "UPDATE leave_balances SET taken_days = entitlement_days - approved_days"
+        " WHERE employee_id = 'emp_001' AND year = 2026"
+    )
+
+    response = client.post(
+        f"/approvals/{action_id}", json={"decision": "approve"}, headers=_approver("emp_005")
+    )
+
+    assert response.status_code == 409
+    assert "only 0.0 are left in 2026" in response.json()["detail"]
+    assert seeded_db.execute("SELECT count(*) FROM leave_requests").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(
@@ -805,10 +846,10 @@ def _count(conn, table: str) -> int:
     return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
 
 
-def _pending_days(conn, employee_id: str) -> float:
+def _approved_days(conn, employee_id: str) -> float:
     return float(
         conn.execute(
-            "SELECT pending_days FROM leave_balances WHERE employee_id = %s AND year = 2026",
+            "SELECT approved_days FROM leave_balances WHERE employee_id = %s AND year = 2026",
             (employee_id,),
         ).fetchone()[0]
     )
@@ -816,7 +857,7 @@ def _pending_days(conn, employee_id: str) -> float:
 
 def test_a_leave_request_needs_an_approver_before_it_is_written(client, seeded_db):
     action_id = _propose_with_tool("emp_001", "req-e2e-1", submit_leave_request, **_leave_request())
-    pending_before = _pending_days(seeded_db, "emp_001")
+    approved_before = _approved_days(seeded_db, "emp_001")
 
     # the proposal is in the queue with its payload, and nothing is written yet
     queue = client.get("/approvals", headers=_approver("emp_005")).json()
@@ -842,12 +883,12 @@ def test_a_leave_request_needs_an_approver_before_it_is_written(client, seeded_d
     assert [(r[0], str(r[1]), str(r[2]), float(r[3]), r[4]) for r in rows] == [
         ("emp_001", "2026-11-02", "2026-11-03", 2.0, "approved")
     ]
-    assert _pending_days(seeded_db, "emp_001") == pending_before + 2
+    assert _approved_days(seeded_db, "emp_001") == approved_before + 2
 
     # a second decision is refused and changes nothing
     assert _decide(client, action_id, "emp_010", "reject").status_code == 409
     assert _count(seeded_db, "leave_requests") == 1
-    assert _pending_days(seeded_db, "emp_001") == pending_before + 2
+    assert _approved_days(seeded_db, "emp_001") == approved_before + 2
     _assert_no_unapproved_writes(seeded_db)
 
 
@@ -864,12 +905,12 @@ def test_an_approver_cannot_approve_their_own_leave_request(client, seeded_db):
 
 def test_a_rejected_leave_request_writes_nothing(client, seeded_db):
     action_id = _propose_with_tool("emp_001", "req-e2e-3", submit_leave_request, **_leave_request())
-    pending_before = _pending_days(seeded_db, "emp_001")
+    approved_before = _approved_days(seeded_db, "emp_001")
 
     assert _decide(client, action_id, "emp_005", "reject").json()["status"] == "rejected"
 
     assert _count(seeded_db, "leave_requests") == 0
-    assert _pending_days(seeded_db, "emp_001") == pending_before
+    assert _approved_days(seeded_db, "emp_001") == approved_before
     assert _decide(client, action_id, "emp_010", "approve").status_code == 409
     assert _count(seeded_db, "leave_requests") == 0
     _assert_no_unapproved_writes(seeded_db)
