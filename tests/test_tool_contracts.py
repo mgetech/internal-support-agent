@@ -12,11 +12,13 @@ from typing import Any, Literal
 
 import pytest
 from langchain_core.tools import tool as as_langchain_tool
+from langchain_core.utils.function_calling import convert_to_openai_function
 from mcp.server.mcpserver import MCPServer
 from tests.tool_args import sample_args
 
 from support_agent.request_context import NoRequestContextError
 from support_agent.tools import TOOLS, Tool
+from support_agent.tools.hr_it import create_ticket
 
 # The tool belt as published to the model. Adding or removing a tool is a contract change.
 EXPECTED_TOOLS = {
@@ -98,6 +100,16 @@ def mcp_schema(fn: Tool) -> dict[str, Any]:
 def identity_fields(fn: Tool) -> set[str]:
     names = set(property_names(langgraph_schema(fn))) | set(property_names(mcp_schema(fn)))
     return {n for n in names if is_identity_field(n)}
+
+
+def test_create_ticket_schema_describes_each_category():
+    # the same schema the agent node sends to the model
+    description = convert_to_openai_function(create_ticket)["description"]
+
+    assert '"access": VPN, accounts, passwords, permissions.' in description
+    assert '"hardware": laptops, monitors, phones, peripherals.' in description
+    assert '"software": installing, licensing or fixing applications.' in description
+    assert '"security": phishing, lost devices, exposed credentials.' in description
 
 
 def test_registry_publishes_the_tool_contract():

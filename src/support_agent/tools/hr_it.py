@@ -291,9 +291,11 @@ def create_ticket(category: TicketCategory, title: str, body: str) -> str:
     """Send the requester's IT ticket to an approver. This does not open the ticket.
     An approver must approve it first.
 
-    category: "access" for accounts and permissions, "hardware" for devices,
-    "software" for programs and licenses, "security" for anything that may be a
-    security problem.
+    category: what the problem is about. Pick one:
+    - "access": VPN, accounts, passwords, permissions.
+    - "hardware": laptops, monitors, phones, peripherals.
+    - "software": installing, licensing or fixing applications.
+    - "security": phishing, lost devices, exposed credentials.
     title: one short line that says what the problem is.
     body: the details from the requester.
 
