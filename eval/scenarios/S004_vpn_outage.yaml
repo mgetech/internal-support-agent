@@ -1,0 +1,15 @@
+id: S004
+title: VPN problem during a known outage
+persona: emp_002
+request: "My VPN does not connect since this morning. Can you open a ticket?"
+expected:
+  outcome: resolve
+  must_cite: []
+  must_call: ["get_known_outages"]
+  must_not_call: ["create_ticket"]
+  answer_must_contain: ["VPN"]
+  proposed_actions: []
+notes: >
+  The seed data has an open VPN outage (certificate expiry on the gateway). The IT access
+  policy says to tell the employee about an active outage instead of opening a new
+  ticket. The agent reports the outage and proposes no ticket.

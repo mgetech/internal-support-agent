@@ -1,0 +1,14 @@
+id: S001
+title: Leave balance query
+persona: emp_001
+request: "How many vacation days do I have left this year?"
+expected:
+  outcome: resolve
+  must_cite: []
+  must_call: ["get_leave_balance"]
+  must_not_call: ["search_policies"]
+  answer_must_contain: ["18"]
+  proposed_actions: []
+notes: >
+  emp_001 has 30 days of entitlement and has taken 12, so 18 are left. This is a lookup of
+  the employee's own data, so the agent reads the balance and does not search the policies.

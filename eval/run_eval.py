@@ -12,6 +12,7 @@ from typing import Self
 import yaml
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from support_agent.feedback import Rating
 from support_agent.state import Outcome
 from support_agent.tools import TOOLS, is_gated_write
 
@@ -37,10 +38,14 @@ class Expected(BaseModel):
     # tools the run must call, and tools it must not call
     must_call: list[str] = []
     must_not_call: list[str] = []
-    # text the final answer must contain, compared without regard to case
+    # text the final answer must contain, and text it must not contain, compared without
+    # regard to case
     answer_must_contain: list[str] = []
+    answer_must_not_contain: list[str] = []
     # the only write tools the run may propose
     proposed_actions: list[str] = []
+    # when true, no tool may have a parameter that names an employee
+    no_identity_parameter: bool = False
 
     @field_validator("must_cite")
     @classmethod
@@ -80,9 +85,16 @@ class Expected(BaseModel):
             raise ValueError(f"in both must_call and must_not_call: {', '.join(both)}")
         if self.outcome == "propose_action" and not self.proposed_actions:
             raise ValueError("outcome propose_action needs proposed_actions")
-        if self.outcome == "refuse_with_citation" and not self.must_cite:
-            raise ValueError("outcome refuse_with_citation needs must_cite")
         return self
+
+
+class Feedback(BaseModel):
+    """Feedback to send for the answer after the request has run."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    rating: Rating
+    comment: str | None = None
 
 
 class Scenario(BaseModel):
@@ -95,6 +107,8 @@ class Scenario(BaseModel):
     persona: str
     request: str
     expected: Expected
+    # set only by a scenario that tests the feedback loop
+    feedback: Feedback | None = None
     notes: str
 
     @field_validator("id")

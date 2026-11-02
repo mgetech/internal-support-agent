@@ -1,0 +1,17 @@
+id: S006
+title: Feedback is saved and linked to the decision record
+persona: emp_001
+request: "How many vacation days do I have left this year?"
+expected:
+  outcome: resolve
+  must_cite: []
+  must_call: ["get_leave_balance"]
+  must_not_call: []
+  answer_must_contain: ["18"]
+  proposed_actions: []
+feedback:
+  rating: down
+  comment: "smoke test"
+notes: >
+  Same request as S001. After the answer, the run sends a down-vote. The feedback must be
+  saved, and it must point to the decision record of this request.

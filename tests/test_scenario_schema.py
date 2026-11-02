@@ -1,8 +1,11 @@
 from pathlib import Path
 
 import pytest
+from data.generate import generate_employees, read_policies
 from eval.run_eval import SCENARIOS_DIR, Scenario, load_scenarios
 from pydantic import ValidationError
+
+from support_agent.chunking import StructuralChunker
 
 
 def _scenario(**expected: object) -> dict:
@@ -43,7 +46,9 @@ def test_expected_lists_default_to_empty():
     assert expected.must_call == []
     assert expected.must_not_call == []
     assert expected.answer_must_contain == []
+    assert expected.answer_must_not_contain == []
     assert expected.proposed_actions == []
+    assert expected.no_identity_parameter is False
 
 
 def test_a_full_scenario_is_accepted():
@@ -105,9 +110,19 @@ def test_propose_action_needs_proposed_actions():
         Scenario(**_scenario(outcome="propose_action"))
 
 
-def test_refuse_with_citation_needs_a_citation():
-    with pytest.raises(ValidationError, match="needs must_cite"):
-        Scenario(**_scenario(outcome="refuse_with_citation"))
+def test_a_refusal_does_not_need_a_citation():
+    # a refusal for a permission reason has no policy to cite
+    Scenario(**_scenario(outcome="refuse_with_citation"))
+
+
+def test_feedback_is_optional_and_checks_the_rating():
+    assert Scenario(**_scenario()).feedback is None
+
+    scenario = Scenario(**{**_scenario(), "feedback": {"rating": "down", "comment": "wrong"}})
+    assert scenario.feedback.rating == "down"
+
+    with pytest.raises(ValidationError):
+        Scenario(**{**_scenario(), "feedback": {"rating": "meh"}})
 
 
 @pytest.mark.parametrize("persona", ["emp_1", "alice", "EMP_001"])
@@ -126,6 +141,30 @@ def test_id_must_look_like_s001(scenario_id):
 def test_text_fields_must_not_be_blank(field):
     with pytest.raises(ValidationError, match="blank"):
         Scenario(**{**_scenario(), field: "  "})
+
+
+def test_the_m0_roster_is_complete():
+    assert set(load_scenarios()) == {f"S00{n}" for n in range(1, 7)}
+
+
+def test_every_persona_is_in_the_seed_data():
+    employee_ids = {employee["id"] for employee in generate_employees()}
+
+    for scenario in load_scenarios().values():
+        assert scenario.persona in employee_ids, scenario.id
+
+
+def test_every_cited_chunk_exists_in_the_policy_corpus():
+    chunker = StructuralChunker()
+    chunk_ids = {
+        chunk.id
+        for policy_id, policy in read_policies().items()
+        for chunk in chunker.chunk(policy_id, policy.text)
+    }
+
+    for scenario in load_scenarios().values():
+        missing = set(scenario.expected.must_cite) - chunk_ids
+        assert not missing, f"{scenario.id}: {sorted(missing)}"
 
 
 def test_loader_reads_files_by_id(tmp_path):

@@ -1,0 +1,15 @@
+id: S003
+title: Leave request over the remaining balance
+persona: emp_004
+request: "Book me off Nov 2 to Nov 13, 2026, I need a break."
+expected:
+  outcome: refuse_with_citation
+  must_cite: ["vacation-policy#entitlement#0"]
+  must_call: ["get_leave_balance"]
+  must_not_call: ["submit_leave_request"]
+  answer_must_contain: []
+  proposed_actions: []
+notes: >
+  emp_004 has 30 days of entitlement and has taken 26.5, so 3.5 are left. The request is
+  for 10 working days. The agent checks the balance, refuses, and cites the entitlement
+  rule. It does not send a request that cannot be approved.
