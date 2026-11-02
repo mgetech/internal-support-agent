@@ -139,13 +139,22 @@ def test_committed_prompts_match_committed_checksums():
     assert version_problems(load_prompts(), recorded) == []
 
 
-def test_agent_prompt_has_the_eight_rules_in_order():
+def test_agent_prompt_has_the_nine_rules_in_order():
     text = load_prompts()["agent_system"].text
-    rule_starts = [text.find(f"\n{n}. ") for n in range(1, 9)]
+    rule_starts = [text.find(f"\n{n}. ") for n in range(1, 10)]
 
     assert -1 not in rule_starts
     assert rule_starts == sorted(rule_starts)
-    assert "\n9. " not in text
+    assert "\n10. " not in text
+
+
+def test_agent_prompt_refuses_only_through_decline_request_and_escalates_assessments():
+    text = " ".join(load_prompts()["agent_system"].text.split())
+
+    assert "Refuse only with the decline_request tool" in text
+    assert "A refusal needs at least one citation" in text
+    assert "Never refuse the cases in rule 4" in text
+    assert "do not call decline_request for them" in text
 
 
 def test_agent_prompt_proposes_without_asking_and_never_invites_a_reply():

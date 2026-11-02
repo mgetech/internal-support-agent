@@ -60,7 +60,7 @@ run against a live model: the tests use a scripted one. What exists today:
   testing, and are not legal advice.
 - **Identity from the session.** Tools read the employee from the request. The model
   never gives an employee id, and no tool accepts one.
-- **Typed tools.** Five tools. Read tools query the employee's own records. The model
+- **Typed tools.** Six tools. Read tools query the employee's own records. The model
   never writes SQL.
 - **Proposals, not writes.** Write tools add to an approval queue and change nothing.
 - **Role-checked approval.** Only an `hr_partner` or a `manager` can decide, never on their
@@ -74,6 +74,9 @@ run against a live model: the tests use a scripted one. What exists today:
   model classifies first, so a request that is out of scope ends before the agent and its
   tools run.
 - **Citation check.** Every cited chunk must come from this request's search.
+- **Refusal with citation.** The agent ends a request that goes against a policy or the
+  employee's permissions with `decline_request`. The refusal must cite a section from this
+  request's search, or it is retried once and then escalated.
 - **Decision Records.** One saved record per request: outcome, reason, evidence, versions
   and cost.
 - **Model client.** Responses API, retry, fallback model and a cost in euros per call.

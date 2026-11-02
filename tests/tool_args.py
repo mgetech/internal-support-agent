@@ -20,6 +20,8 @@ def _sample(annotation: Any) -> Any:
     origin = get_origin(annotation)
     if origin is Literal:
         return get_args(annotation)[0]
+    if origin is list:
+        return [_sample(get_args(annotation)[0])]
     if origin in (Union, types.UnionType):
         return _sample(next(a for a in get_args(annotation) if a is not type(None)))
     raise TypeError(f"no sample value for parameter type {annotation!r}")

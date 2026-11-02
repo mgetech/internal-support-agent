@@ -97,6 +97,8 @@ class Expected(BaseModel):
             raise ValueError(f"in both must_call and must_not_call: {', '.join(both)}")
         if self.outcome == "propose_action" and not self.proposed_actions:
             raise ValueError("outcome propose_action needs proposed_actions")
+        if self.outcome == "refuse_with_citation" and not self.must_cite:
+            raise ValueError("outcome refuse_with_citation needs must_cite")
         return self
 
 

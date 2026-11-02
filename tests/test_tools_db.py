@@ -18,6 +18,7 @@ from support_agent.tools import (
     Tool,
     base,
     create_ticket,
+    decline_request,
     get_known_outages,
     get_leave_balance,
     search_policies,
@@ -336,3 +337,19 @@ def test_leave_balance_year_defaults_to_the_current_year(seeded_db, monkeypatch)
 
     monkeypatch.setattr(util, "get_today", lambda: date(2025, 3, 1))
     assert "error" in _as("emp_001", get_leave_balance)
+
+
+def test_decline_request_with_a_blank_reason_does_not_decline(seeded_db):
+    result = _as("emp_001", decline_request, "  ", [])
+
+    assert result == {"declined": False, "error": "the reason is empty"}
+
+
+def test_decline_request_changes_no_data(seeded_db):
+    before = {t: _count(seeded_db, t) for t in ("pending_actions", "leave_requests", "tickets")}
+
+    result = _as("emp_001", decline_request, "No.", ["vacation-policy#entitlement#0"])
+
+    assert result == {"declined": True}
+    after = {t: _count(seeded_db, t) for t in before}
+    assert after == before

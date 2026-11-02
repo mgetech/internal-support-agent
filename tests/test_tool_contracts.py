@@ -27,6 +27,7 @@ EXPECTED_TOOLS = {
     "get_known_outages",
     "submit_leave_request",
     "create_ticket",
+    "decline_request",
 }
 
 # Parameter names that would let the caller say whose data to use. Compared after

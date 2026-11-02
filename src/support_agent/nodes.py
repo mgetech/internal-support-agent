@@ -289,32 +289,84 @@ def tools_node(tools: Sequence[Tool]) -> Callable[[AgentState], dict[str, Any]]:
     return run_tools
 
 
+def _get_declined_args(state: AgentState) -> dict[str, Any] | None:
+    """The arguments of the `decline_request` call in the latest reply of the agent, if
+    the tool accepted it. The tool answers "declined": false when it did not.
+    """
+    messages = state["messages"]
+    last_reply = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+    if last_reply is None:
+        return None
+    results = {m.tool_call_id: m.text for m in messages if isinstance(m, ToolMessage)}
+    for call in last_reply.tool_calls:
+        if call["name"] != "decline_request" or call["id"] not in results:
+            continue
+        try:
+            declined = json.loads(results[call["id"]]).get("declined") is True
+        except (json.JSONDecodeError, AttributeError):
+            declined = False
+        if declined:
+            return call["args"]
+    return None
+
+
+def route_after_tools(state: AgentState) -> Literal["agent", "decline"]:
+    """A refusal that the tool accepted goes to `decline`. Anything else goes back to the
+    agent.
+    """
+    return "decline" if _get_declined_args(state) is not None else "agent"
+
+
+def decline_node(state: AgentState) -> dict[str, Any]:
+    """Turn the accepted `decline_request` call into the final answer: the reason, then
+    the citations as `[chunk:<id>]`. It sets the outcome and the verify node checks the
+    citations.
+    """
+    args = _get_declined_args(state)
+    if args is None:
+        raise ValueError("the decline node needs an accepted decline_request call")
+    citations = list(dict.fromkeys(args["citations"]))
+    cited = " ".join(f"[chunk:{chunk_id}]" for chunk_id in citations)
+    text = f"{args['reason'].strip()} {cited}".strip()
+    return {"messages": [AIMessage(text)], "outcome": "refuse_with_citation"}
+
+
 def verify_node(state: AgentState) -> dict[str, Any]:
     """Run the deterministic checks on the draft answer, which is the last message.
 
-    If the draft passes, the request ends: `propose_action` when this request proposed
-    actions, `resolve` otherwise.
+    If the draft passes, the request ends: `refuse_with_citation` for a refusal (the
+    `decline` node has set it), `propose_action` when this request proposed actions,
+    `resolve` otherwise. A refusal must have at least one citation.
 
     If it fails, the agent gets one more try. The objection is saved in
-    `verifier_objection` and `outcome` stays unset. If a draft fails while an objection
-    is already saved, the retry has been used, and the request ends in `escalate`.
+    `verifier_objection` and `outcome` is unset again. If a draft fails while an
+    objection is already saved, the retry has been used, and the request ends in
+    `escalate`.
     """
     ctx = get_request_context()
     start = len(ctx.evidence)
     draft = state["messages"][-1].text
-    verdict = verify_citations(draft, state["retrieved_chunk_ids"])
+    is_refusal = state.get("outcome") == "refuse_with_citation"
+    verdict = verify_citations(draft, state["retrieved_chunk_ids"], require_citation=is_refusal)
     ctx.evidence.append({"type": "verifier_verdict", **verdict.model_dump()})
 
     if verdict.passed:
-        outcome = "propose_action" if state["proposed_action_ids"] else "resolve"
+        if is_refusal:
+            outcome = "refuse_with_citation"
+        else:
+            outcome = "propose_action" if state["proposed_action_ids"] else "resolve"
         return {"outcome": outcome, "decision_evidence": _evidence_since(start)}
 
     if state["verifier_objection"] is None:
         ctx.evidence.append({"type": "retry", "reason": "citation_check_failed"})
-        return {
+        update: dict[str, Any] = {
             "verifier_objection": verdict.objection,
             "decision_evidence": _evidence_since(start),
         }
+        if is_refusal:
+            # the `decline` node set the outcome. The retry starts without one.
+            update["outcome"] = None
+        return update
 
     ctx.evidence.append({"type": "escalation", "reason": "citation_check_failed"})
     return {"outcome": "escalate", "decision_evidence": _evidence_since(start)}

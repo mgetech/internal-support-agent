@@ -103,7 +103,15 @@ def make_tools(tool_calls):
         _add_tool_result("create_ticket", "proposed a ticket", f"pending_actions:{action_id}")
         return json.dumps({"proposed": True, "action_id": action_id})
 
-    return [search_policies, get_leave_balance, create_ticket]
+    def decline_request(reason: str, citations: list[str]) -> str:
+        """Decline the request."""
+        tool_calls.append(("decline_request", {"reason": reason, "citations": citations}))
+        _add_tool_result("decline_request", "declined", None)
+        if not reason.strip():
+            return json.dumps({"declined": False, "error": "the reason is empty"})
+        return json.dumps({"declined": True})
+
+    return [search_policies, get_leave_balance, create_ticket, decline_request]
 
 
 def run_graph(llm, text="hi", saved_records=None, **graph_options):

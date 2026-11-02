@@ -82,7 +82,7 @@ def test_a_proposal_names_the_pending_actions():
         ("model_unavailable", "no model answered"),
         ("invalid_tool_arguments", "the model sent tool arguments that were not valid JSON"),
         ("tool_limit_reached", "the tool limit was reached"),
-        ("citation_check_failed", "the answer cited a source this request did not retrieve"),
+        ("citation_check_failed", "the answer's citations failed the check"),
     ],
 )
 def test_an_escalation_gives_its_reason(reason, words):

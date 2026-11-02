@@ -114,9 +114,9 @@ def test_propose_action_needs_proposed_actions():
         Scenario(**_scenario(outcome="propose_action"))
 
 
-def test_a_refusal_does_not_need_a_citation():
-    # a refusal for a permission reason has no policy to cite
-    Scenario(**_scenario(outcome="refuse_with_citation"))
+def test_refuse_with_citation_needs_a_citation():
+    with pytest.raises(ValidationError, match="needs must_cite"):
+        Scenario(**_scenario(outcome="refuse_with_citation"))
 
 
 def test_feedback_is_optional_and_checks_the_rating():
