@@ -3,8 +3,10 @@ generator must be deterministic — no wall-clock or RNG dependence.
 """
 
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 import pytest
+from data import generate
 from data.generate import (
     embed_policy_chunks,
     generate_employees,
@@ -17,6 +19,15 @@ from data.generate import (
     render_seed_sql,
     write_seed_sql,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_embedding_cache(tmp_path, monkeypatch):
+    """No test here may write fake vectors into the real cache in .embeddings-cache, or
+    need the settings to name the model.
+    """
+    monkeypatch.setattr(generate, "CACHE_DIR", tmp_path / "embedding-cache")
+    monkeypatch.setattr(generate, "get_embedding_model", lambda: "fake")
 
 
 def _balance(employee_id: str) -> dict:
@@ -290,6 +301,57 @@ def test_embed_policy_chunks_caches_and_skips_already_embedded_content(tmp_path)
     assert (tmp_path / "fake.json").exists()
 
 
+def test_an_edited_chunk_with_the_same_id_is_embedded_again(tmp_path):
+    chunk = {"id": "vacation-policy#entitlement#0", "content": "30 days a year"}
+    other = {"id": "vacation-policy#carryover#0", "content": "5 days carry over"}
+    calls = []
+
+    def counting_embed(texts):
+        calls.append(list(texts))
+        return [[float(len(t))] for t in texts]
+
+    def embed(rows):
+        return embed_policy_chunks(rows, embed_fn=counting_embed, model="m", cache_dir=tmp_path)
+
+    first = embed([chunk, other])
+    again = embed([chunk, other])
+    edited = embed([{**chunk, "content": "28 days a year, or more"}, other])
+
+    assert calls == [["30 days a year", "5 days carry over"], ["28 days a year, or more"]]
+    assert again == first
+    # same id, new text: a new vector. The unchanged chunk comes from the cache.
+    assert edited[chunk["id"]] != first[chunk["id"]]
+    assert edited[other["id"]] == first[other["id"]]
+
+
+def test_the_cache_is_not_shared_between_embedding_models(tmp_path):
+    rows = [{"id": "vacation-policy#carryover#0", "content": "5 days carry over"}]
+    calls = []
+
+    def counting_embed(texts):
+        calls.append(list(texts))
+        return [[0.0] for _ in texts]
+
+    embed_policy_chunks(rows, embed_fn=counting_embed, model="model-a", cache_dir=tmp_path)
+    embed_policy_chunks(rows, embed_fn=counting_embed, model="model-b", cache_dir=tmp_path)
+    embed_policy_chunks(rows, embed_fn=counting_embed, model="model-a", cache_dir=tmp_path)
+
+    # model-b is embedded on its own, and model-a is still cached
+    assert len(calls) == 2
+    assert {path.name for path in tmp_path.iterdir()} == {"model-a.json", "model-b.json"}
+
+
+def test_the_cache_is_keyed_on_the_embedding_deployment_from_the_settings(monkeypatch, tmp_path):
+    monkeypatch.undo()
+    rows = [{"id": "vacation-policy#carryover#0", "content": "5 days carry over"}]
+    settings = SimpleNamespace(azure_openai_deployment_embedding="my-embedding-deployment")
+    monkeypatch.setattr(generate, "get_settings", lambda: settings)
+
+    embed_policy_chunks(rows, embed_fn=lambda texts: [[0.0] for _ in texts], cache_dir=tmp_path)
+
+    assert [path.name for path in tmp_path.iterdir()] == ["my-embedding-deployment.json"]
+
+
 def test_render_seed_sql_contains_every_seeded_table():
     sql = render_seed_sql()
 
@@ -338,6 +400,12 @@ def test_load_seed_data_populates_every_seeded_table(clean_db):
         "SELECT count(*) FROM policy_chunks WHERE embedding IS NULL"
     ).fetchone()[0]
     assert missing == 0
+
+
+def test_load_seed_data_writes_its_vectors_to_the_cache_it_is_given(clean_db, tmp_path):
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db)
+
+    assert (tmp_path / "embedding-cache" / "fake.json").exists()
 
 
 def test_load_seed_data_is_safe_to_run_twice(clean_db):

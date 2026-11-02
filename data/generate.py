@@ -29,13 +29,13 @@ from pgvector.psycopg import register_vector
 
 from support_agent import util
 from support_agent.chunking import StructuralChunker
+from support_agent.config import get_settings
 from support_agent.db import fetch_one, get_pool
 from support_agent.embeddings import embed_texts
 
 POLICIES_DIR = Path(__file__).resolve().parent / "policies"
 SEED_SQL_PATH = Path(__file__).resolve().parent / "seed.sql"
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".embeddings-cache"
-EMBEDDING_MODEL = "text-embedding-3-small"
 
 # emp_006 is hired this many days before `as_of`, but never before January 1 of its
 # year, so the employee is in their first calendar year on any date
@@ -268,17 +268,27 @@ def _save_cache(cache_dir: Path, model: str, cache: dict[str, list[float]]) -> N
     _cache_path(cache_dir, model).write_text(json.dumps(cache), encoding="utf-8")
 
 
+def get_embedding_model() -> str:
+    """The name the embedding cache is keyed on: the deployment that `embed_texts` calls."""
+    return get_settings().azure_openai_deployment_embedding
+
+
 def embed_policy_chunks(
     rows: list[dict] | None = None,
     embed_fn: EmbedFn = embed_texts,
-    model: str = EMBEDDING_MODEL,
-    cache_dir: Path = CACHE_DIR,
+    model: str | None = None,
+    cache_dir: Path | None = None,
 ) -> dict[str, list[float]]:
-    """Chunk id -> embedding vector. Only chunks whose content hash is
-    missing from the on-disk cache are sent to `embed_fn`, so regenerating
-    is free once every current chunk has been embedded once.
+    """Chunk id -> embedding vector. The cache is keyed on the model and on a hash of the
+    chunk text, not on the chunk id: each model has its own cache file, and an entry is
+    the hash of the text. Only chunks whose text hash is missing from the cache are sent
+    to `embed_fn`, so regenerating is free once every current text has been embedded
+    once, and an edited chunk is embedded again. `model` is the embedding deployment from
+    the settings unless given.
     """
     rows = generate_policy_chunks() if rows is None else rows
+    model = model or get_embedding_model()
+    cache_dir = cache_dir or CACHE_DIR
     cache = _load_cache(cache_dir, model)
 
     missing = {_content_hash(row["content"]): row["content"] for row in rows}
