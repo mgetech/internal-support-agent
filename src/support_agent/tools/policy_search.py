@@ -29,21 +29,22 @@ def fuse(rankings: list[list[str]], k: int = RRF_K) -> list[str]:
 
 
 def get_policy_version() -> str | None:
-    """The version of the policy corpus that search runs against, read from the chunks
-    that `search_policies` reads. It is None when there are no chunks. If the chunks come
-    from more than one version, for example after a partial re-seed, every version is
-    returned, joined with ", ", so a Decision Record never names a version that was not
-    used.
+    """The versions of the policies that search runs against, read from the chunks that
+    `search_policies` reads: every policy with its version, sorted by policy name, like
+    "expense-policy@2026-09.1; it-access-policy@2026-11.1". It is None when there are no
+    chunks. A policy whose chunks come from more than one version, for example after a
+    partial re-seed, is listed once for each version, so a Decision Record never names a
+    version that was not used.
     """
     rows = db.fetch_all(
         """
-        SELECT DISTINCT policy_version
+        SELECT DISTINCT policy, policy_version
         FROM policy_chunks
         WHERE chunker = 'structural'
-        ORDER BY policy_version
+        ORDER BY policy, policy_version
         """
     )
-    return ", ".join(row["policy_version"] for row in rows) or None
+    return "; ".join(f"{row['policy']}@{row['policy_version']}" for row in rows) or None
 
 
 def get_policy_chunk(chunk_id: str) -> dict[str, str]:
@@ -100,15 +101,17 @@ def search_policies(query: str) -> str:
     )
 
     top = fuse([[r["id"] for r in by_vector], [r["id"] for r in by_keyword]])[:TOP_K]
+    rows = db.fetch_all(
+        "SELECT id, policy, heading, content, policy_version FROM policy_chunks WHERE id = ANY(%s)",
+        (top,),
+    )
+    by_id = {r["id"]: r for r in rows}
     summary = f"{len(top)} chunks found" if top else "no chunks found"
-    record_tool_call("search_policies", {"query": query}, summary, top, started_at)
+    chunks = [{"id": cid, "policy_version": by_id[cid]["policy_version"]} for cid in top]
+    record_tool_call("search_policies", {"query": query}, summary, chunks, started_at)
     if not top:
         return json.dumps({"results": []})
 
-    rows = db.fetch_all(
-        "SELECT id, policy, heading, content FROM policy_chunks WHERE id = ANY(%s)", (top,)
-    )
-    by_id = {r["id"]: r for r in rows}
     return json.dumps(
         {
             "results": [

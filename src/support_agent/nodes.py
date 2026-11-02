@@ -272,7 +272,7 @@ def tools_node(tools: Sequence[Tool]) -> Callable[[AgentState], dict[str, Any]]:
             if item.get("type") != "tool_result":
                 continue
             if item["tool"] == "search_policies" and isinstance(item["ref"], list):
-                chunk_ids.extend(item["ref"])
+                chunk_ids.extend(chunk["id"] for chunk in item["ref"])
             if item["tool"] in gated_writes and str(item["ref"]).startswith("pending_actions:"):
                 action_id = int(item["ref"].split(":", 1)[1])
                 if action_id not in state["proposed_action_ids"] + action_ids:

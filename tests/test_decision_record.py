@@ -32,6 +32,7 @@ from support_agent.decision_record import (
 )
 from support_agent.llm import LLMUnavailableError
 from support_agent.request_context import bind_request_context
+from support_agent.tools.policy_search import get_policy_version
 
 AGENT_PROMPT = {"prompt_id": "agent_system", "prompt_version": "1.0.0"}
 CLASSIFIER_PROMPT = {"prompt_id": "classifier", "prompt_version": "1.0.0"}
@@ -273,11 +274,11 @@ def test_a_request_without_an_outcome_cannot_be_recorded():
 # and loads the seed data, so employee emp_004 exists. They are skipped without a database.
 
 
-def save_a_record(evidence=(), outcome="resolve", request_id="req-77"):
+def save_a_record(evidence=(), outcome="resolve", request_id="req-77", policy_version="2026-09.1"):
     """Build a record for emp_004 and save it, all inside one bound request."""
     state = final_state(outcome=outcome, evidence=evidence)
     with bind_request_context("emp_004", request_id, "rest"):
-        record = create_decision_record(state, policy_version="2026-09.1")
+        record = create_decision_record(state, policy_version=policy_version)
         save_decision_record(record)
     return record
 
@@ -306,6 +307,18 @@ def test_a_saved_record_can_be_read_back(seeded_db):
     assert row[10] == 1500
     assert float(row[11]) == pytest.approx(0.002)
     assert row[12] is None
+
+
+def test_a_saved_record_lists_all_five_policies_with_their_versions(seeded_db):
+    save_a_record(policy_version=get_policy_version())
+
+    stored = seeded_db.execute(
+        "SELECT policy_version FROM decision_records WHERE request_id = 'req-77'"
+    ).fetchone()[0]
+    assert stored == (
+        "expense-policy@2026-09.1; it-access-policy@2026-11.1; parental-leave-policy@2026-09.1;"
+        " sick-leave-policy@2026-09.1; vacation-policy@2026-09.1"
+    )
 
 
 def test_a_record_without_citations_is_saved_with_an_empty_list(seeded_db):

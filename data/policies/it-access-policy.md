@@ -1,6 +1,6 @@
 ---
 domain: it
-policy_version: 2026-09.1
+policy_version: 2026-11.1
 ---
 # IT Access Policy
 
@@ -29,3 +29,8 @@ Suspected phishing, a lost or stolen device, or exposed credentials are security
 incidents. These are always escalated immediately as a priority ticket; there is
 no self-remediation step for a security incident, regardless of how minor it may
 appear.
+
+## Privacy of Records
+
+Employees can see only their own records, such as their leave balance, leave requests and
+support tickets. A request for the records or personal data of a colleague is refused.

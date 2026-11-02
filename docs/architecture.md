@@ -135,7 +135,8 @@ not taken out.
 
 **Search.** `search_policies` joins two rankings with reciprocal rank fusion: vector
 similarity (pgvector, cosine) and Postgres full-text search. It returns the top five
-sections.
+sections. The evidence item of each search lists the returned chunks, each as its id and
+the version of its policy.
 
 There is no re-ranking stage after the fusion: the corpus is small, the top five is
 already a tenth of it, and the agent reads all five sections.
@@ -344,8 +345,11 @@ request id or the filters and the number of rows. A read has no request of its o
 the event gets a new request id.
 
 **Policy version.** Each policy section is stored with the version from its policy file's
-frontmatter. A record names the version that the database holds, not the version of the
-files on disk. If sections of several versions are stored, the record names all of them.
+frontmatter, and a policy file gets a new version when its text changes. A record names
+every policy with its version, sorted by policy name, for example
+`expense-policy@2026-09.1; it-access-policy@2026-11.1; ...`. It names the versions that
+the database holds, not the versions of the files on disk. If one policy has sections of
+several versions, it is listed once for each.
 
 ## Orphan check
 

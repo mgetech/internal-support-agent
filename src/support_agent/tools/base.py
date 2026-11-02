@@ -15,7 +15,7 @@ from support_agent import audit
 from support_agent.request_context import get_request_context
 
 Tool = Callable[..., str]
-Ref = str | list[str] | None
+Ref = str | list[dict[str, str]] | None
 
 
 def gated_write(fn: Tool) -> Tool:
@@ -40,7 +40,8 @@ def record_tool_call(
     have `latency_ms`, the time since `started_at`.
 
     summary: one short sentence about the result, e.g. "18.0 of 30.0 days left in 2026".
-    ref: where the result came from, e.g. a pending action id or the returned chunk ids.
+    ref: where the result came from, e.g. a pending action id, or the returned chunks as
+    id and policy version.
     started_at: the `time.perf_counter()` value that the tool took when it started.
     conn: pass the tool's cursor to save the audit event in the tool's own transaction.
     """

@@ -84,7 +84,9 @@ def make_tools(tool_calls):
     def search_policies(query: str) -> str:
         """Search the policies."""
         tool_calls.append(("search_policies", {"query": query}))
-        _add_tool_result("search_policies", "1 chunks found", [CHUNK])
+        _add_tool_result(
+            "search_policies", "1 chunks found", [{"id": CHUNK, "policy_version": "2026-09.1"}]
+        )
         return json.dumps({"results": [{"chunk_id": CHUNK}]})
 
     def get_leave_balance(year: int = 2026) -> str:

@@ -188,25 +188,37 @@ def test_five_policies_with_expected_ids_and_domains():
     assert policies["vacation-policy"].domain == "hr"
 
 
-def test_every_policy_carries_the_policy_version_in_frontmatter():
-    for policy in read_policies().values():
-        assert policy.policy_version == "2026-09.1"
+# a policy file gets a new version when its text changes
+POLICY_VERSIONS = {
+    "vacation-policy": "2026-09.1",
+    "sick-leave-policy": "2026-09.1",
+    "parental-leave-policy": "2026-09.1",
+    "expense-policy": "2026-09.1",
+    "it-access-policy": "2026-11.1",
+}
+
+
+def test_every_policy_carries_its_policy_version_in_frontmatter():
+    policies = read_policies()
+
+    assert {id: policy.policy_version for id, policy in policies.items()} == POLICY_VERSIONS
 
 
 def test_every_policy_chunk_row_carries_the_version_of_its_policy_file():
-    versions = {policy.policy_version for policy in read_policies().values()}
-
     rows = generate_policy_chunks()
 
-    assert versions == {"2026-09.1"}
-    assert {row["policy_version"] for row in rows} == versions
+    assert {row["policy"]: row["policy_version"] for row in rows} == POLICY_VERSIONS
 
 
 def test_the_seed_sql_writes_the_policy_version_of_every_chunk():
     sql = render_seed_sql()
 
-    # one quoted version in each of the 16 chunk rows
-    assert sql.count("'2026-09.1'") == len(generate_policy_chunks())
+    # one quoted version in each chunk row: the 5 chunks of the IT access policy have the
+    # new version and the other 12 have the old one
+    chunks = generate_policy_chunks()
+    new_version = [row for row in chunks if row["policy_version"] == "2026-11.1"]
+    assert sql.count("'2026-11.1'") == len(new_version) == 5
+    assert sql.count("'2026-09.1'") == len(chunks) - len(new_version)
 
 
 def test_vacation_policy_has_the_entitlement_heading():
@@ -233,7 +245,7 @@ def test_read_policies_rejects_a_file_missing_frontmatter(tmp_path):
 
 
 def test_generate_policy_chunks_covers_the_whole_corpus():
-    assert len(generate_policy_chunks()) == 16
+    assert len(generate_policy_chunks()) == 17
 
 
 def test_generate_policy_chunks_is_stable_across_regeneration():
@@ -321,7 +333,7 @@ def test_load_seed_data_populates_every_seeded_table(clean_db):
 
     assert clean_db.execute("SELECT count(*) FROM employees").fetchone()[0] == 12
     assert clean_db.execute("SELECT count(*) FROM known_outages").fetchone()[0] == 2
-    assert clean_db.execute("SELECT count(*) FROM policy_chunks").fetchone()[0] == 16
+    assert clean_db.execute("SELECT count(*) FROM policy_chunks").fetchone()[0] == 17
     missing = clean_db.execute(
         "SELECT count(*) FROM policy_chunks WHERE embedding IS NULL"
     ).fetchone()[0]
@@ -333,7 +345,7 @@ def test_load_seed_data_is_safe_to_run_twice(clean_db):
     load_seed_data(embed_fn=_fake_embed, conn=clean_db)
 
     assert clean_db.execute("SELECT count(*) FROM employees").fetchone()[0] == 12
-    assert clean_db.execute("SELECT count(*) FROM policy_chunks").fetchone()[0] == 16
+    assert clean_db.execute("SELECT count(*) FROM policy_chunks").fetchone()[0] == 17
 
 
 def test_the_seed_date_can_be_read_back_from_the_database(clean_db):

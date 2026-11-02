@@ -105,6 +105,7 @@ EXPECTED_CHUNK_IDS = {
     "it-access-policy#password-self-service#0",
     "it-access-policy#software-licenses#0",
     "it-access-policy#security-incidents#0",
+    "it-access-policy#privacy-of-records#0",
 }
 
 

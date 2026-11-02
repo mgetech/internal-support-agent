@@ -283,6 +283,22 @@ def test_search_returns_ids_that_exist(seeded_db, search_embeds_like):
     assert set(ids) <= known
 
 
+def test_search_evidence_has_the_id_and_policy_version_of_each_chunk(seeded_db, search_embeds_like):
+    search_embeds_like("vacation-policy#entitlement#0")
+    with bind_request_context("emp_001", "req-search", "rest") as ctx:
+        search_policies("vacation days and the VPN")
+
+    chunks = ctx.evidence[0]["ref"]
+    stored = dict(seeded_db.execute("SELECT id, policy_version FROM policy_chunks").fetchall())
+    assert [chunk["id"] for chunk in chunks][0] == "vacation-policy#entitlement#0"
+    assert all(set(chunk) == {"id", "policy_version"} for chunk in chunks)
+    assert {chunk["id"]: chunk["policy_version"] for chunk in chunks} == {
+        chunk["id"]: stored[chunk["id"]] for chunk in chunks
+    }
+    # chunks of two policies with different versions
+    assert {chunk["policy_version"] for chunk in chunks} == {"2026-09.1", "2026-11.1"}
+
+
 def test_search_finds_chunks_by_their_words(seeded_db, search_embeds_like):
     # the vector points at an IT chunk, so only the word search can find the carryover one
     search_embeds_like("it-access-policy#vpn-access#0")
