@@ -11,6 +11,7 @@ from pathlib import Path
 import psycopg
 import pytest
 from data.generate import (
+    calculate_index_build_id,
     generate_employees,
     generate_known_outages,
     generate_leave_balances,
@@ -103,7 +104,10 @@ def seeded_db(clean_db):
     """The generated employees, balances, outages and policy chunks. Chunk number i
     (in generate_policy_chunks order) gets fake_vector(i).
     """
-    clean_db.execute("INSERT INTO seed_meta (as_of) VALUES (%s)", (TEST_TODAY,))
+    clean_db.execute(
+        "INSERT INTO seed_meta (as_of, index_build_id) VALUES (%s, %s)",
+        (TEST_TODAY, calculate_index_build_id(generate_policy_chunks(), "test-embedding")),
+    )
     for e in generate_employees(TEST_TODAY):
         clean_db.execute(
             "INSERT INTO employees (id, name, role, employment_type, weekly_hours, country,"

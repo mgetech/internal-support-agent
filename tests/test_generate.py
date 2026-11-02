@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from data import generate
 from data.generate import (
+    calculate_index_build_id,
     embed_policy_chunks,
     generate_employees,
     generate_known_outages,
@@ -19,6 +20,8 @@ from data.generate import (
     render_seed_sql,
     write_seed_sql,
 )
+
+from support_agent.tools.policy_search import get_index_build_id
 
 
 @pytest.fixture(autouse=True)
@@ -182,7 +185,10 @@ def test_another_date_gives_another_seed_sql():
 def test_the_seed_sql_records_its_date():
     sql = render_seed_sql(date(2027, 6, 30))
 
-    assert "INSERT INTO seed_meta (as_of) VALUES\n    ('2027-06-30');" in sql
+    index_build_id = calculate_index_build_id(generate_policy_chunks(), "fake")
+    values = f"('2027-06-30', '{index_build_id}')"
+
+    assert f"INSERT INTO seed_meta (as_of, index_build_id) VALUES\n    {values};" in sql
 
 
 def test_five_policies_with_expected_ids_and_domains():
@@ -352,6 +358,56 @@ def test_the_cache_is_keyed_on_the_embedding_deployment_from_the_settings(monkey
     assert [path.name for path in tmp_path.iterdir()] == ["my-embedding-deployment.json"]
 
 
+# --- the index build id ---
+
+
+def test_the_index_build_id_is_a_short_hash():
+    index_build_id = calculate_index_build_id(generate_policy_chunks(), "model-a")
+
+    assert len(index_build_id) == 12
+    int(index_build_id, 16)
+
+
+def test_the_same_inputs_give_the_same_index_build_id():
+    rows = generate_policy_chunks()
+
+    assert calculate_index_build_id(rows, "model-a") == calculate_index_build_id(rows, "model-a")
+    # the order of the chunks does not matter
+    assert calculate_index_build_id(rows, "model-a") == calculate_index_build_id(
+        list(reversed(rows)), "model-a"
+    )
+
+
+def test_changing_the_version_of_one_policy_changes_the_index_build_id():
+    rows = generate_policy_chunks()
+    changed = [
+        {**row, "policy_version": "2026-12.1"} if row["policy"] == "expense-policy" else row
+        for row in rows
+    ]
+
+    assert calculate_index_build_id(changed, "model-a") != calculate_index_build_id(rows, "model-a")
+
+
+def test_changing_the_chunker_changes_the_index_build_id():
+    rows = generate_policy_chunks()
+    changed = [{**row, "chunker": "fixed"} for row in rows]
+
+    assert calculate_index_build_id(changed, "model-a") != calculate_index_build_id(rows, "model-a")
+
+
+def test_changing_the_embedding_model_changes_the_index_build_id():
+    rows = generate_policy_chunks()
+
+    assert calculate_index_build_id(rows, "model-b") != calculate_index_build_id(rows, "model-a")
+
+
+def test_the_seed_sql_changes_with_the_embedding_model(monkeypatch):
+    first = render_seed_sql(date(2027, 6, 30))
+    monkeypatch.setattr(generate, "get_embedding_model", lambda: "another-model")
+
+    assert render_seed_sql(date(2027, 6, 30)) != first
+
+
 def test_render_seed_sql_contains_every_seeded_table():
     sql = render_seed_sql()
 
@@ -414,6 +470,25 @@ def test_load_seed_data_is_safe_to_run_twice(clean_db):
 
     assert clean_db.execute("SELECT count(*) FROM employees").fetchone()[0] == 12
     assert clean_db.execute("SELECT count(*) FROM policy_chunks").fetchone()[0] == 17
+
+
+def test_reseeding_the_same_inputs_keeps_the_index_build_id(clean_db):
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db)
+    first = get_index_build_id()
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db, as_of=date(2027, 6, 30))
+
+    assert first == calculate_index_build_id(generate_policy_chunks(), "fake")
+    # another seed date does not change how the index was built
+    assert get_index_build_id() == first
+
+
+def test_reseeding_with_another_embedding_model_changes_the_index_build_id(clean_db, monkeypatch):
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db)
+    first = get_index_build_id()
+    monkeypatch.setattr(generate, "get_embedding_model", lambda: "another-model")
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db)
+
+    assert get_index_build_id() != first
 
 
 def test_the_seed_date_can_be_read_back_from_the_database(clean_db):

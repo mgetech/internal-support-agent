@@ -82,6 +82,13 @@ There is no date setting, and the stack runs in any year:
 - The date is saved in the one-row table `seed_meta`, so a reader can tell which date a
   database was seeded for (`get_seed_as_of()` in `data/generate.py`).
 
+**The index build id.** `seed_meta` also holds `index_build_id`: a 12-character hash of the
+sorted list of `policy@version`, the chunker name and the embedding model. The same inputs
+give the same id, so seeding again changes nothing, and a new policy version, chunker or
+embedding model gives a new id. `get_index_build_id()` in `policy_search.py` reads it. The
+evidence item of every search carries it, so a result can be traced to the index it came
+from. The seed date is not part of the id.
+
 All code gets today's date from `util.get_today()`, which tests replace with a fixed date.
 `get_leave_balance` uses its year when the model gives none.
 
@@ -136,7 +143,7 @@ not taken out.
 **Search.** `search_policies` joins two rankings with reciprocal rank fusion: vector
 similarity (pgvector, cosine) and Postgres full-text search. It returns the top five
 sections. The evidence item of each search lists the returned chunks, each as its id and
-the version of its policy.
+the version of its policy, and the id of the index build that was searched.
 
 There is no re-ranking stage after the fusion: the corpus is small, the top five is
 already a tenth of it, and the agent reads all five sections.

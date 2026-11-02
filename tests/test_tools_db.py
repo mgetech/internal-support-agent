@@ -295,6 +295,9 @@ def test_search_evidence_has_the_id_and_policy_version_of_each_chunk(seeded_db, 
     assert {chunk["id"]: chunk["policy_version"] for chunk in chunks} == {
         chunk["id"]: stored[chunk["id"]] for chunk in chunks
     }
+    # the evidence names the build of the index that was searched
+    index_build_id = seeded_db.execute("SELECT index_build_id FROM seed_meta").fetchone()[0]
+    assert ctx.evidence[0]["index_build_id"] == index_build_id
     # chunks of two policies with different versions
     assert {chunk["policy_version"] for chunk in chunks} == {"2026-09.1", "2026-11.1"}
 

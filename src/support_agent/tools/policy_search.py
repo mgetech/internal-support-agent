@@ -47,6 +47,14 @@ def get_policy_version() -> str | None:
     return "; ".join(f"{row['policy']}@{row['policy_version']}" for row in rows) or None
 
 
+def get_index_build_id() -> str | None:
+    """The id of the policy index build that search runs against, saved when the database
+    was seeded. It is None if the database was not seeded.
+    """
+    row = db.fetch_one("SELECT index_build_id FROM seed_meta")
+    return row["index_build_id"] if row else None
+
+
 def get_policy_chunk(chunk_id: str) -> dict[str, str]:
     """One policy section by its chunk id, as the answer cites it. Raises LookupError if
     there is no such chunk.
@@ -108,7 +116,14 @@ def search_policies(query: str) -> str:
     by_id = {r["id"]: r for r in rows}
     summary = f"{len(top)} chunks found" if top else "no chunks found"
     chunks = [{"id": cid, "policy_version": by_id[cid]["policy_version"]} for cid in top]
-    record_tool_call("search_policies", {"query": query}, summary, chunks, started_at)
+    record_tool_call(
+        "search_policies",
+        {"query": query},
+        summary,
+        chunks,
+        started_at,
+        details={"index_build_id": get_index_build_id()},
+    )
     if not top:
         return json.dumps({"results": []})
 
