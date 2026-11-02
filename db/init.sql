@@ -4,6 +4,11 @@
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- the date the seed data was generated as of (one row, written by data/generate.py)
+CREATE TABLE seed_meta (
+    as_of DATE NOT NULL
+);
+
 CREATE TABLE employees (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

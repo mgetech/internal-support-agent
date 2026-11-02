@@ -55,7 +55,8 @@ partners, a "Why this answer?" view, a "My requests" tab, an approval queue tab,
 run against a live model: the tests use a scripted one. What exists today:
 
 - **Synthetic data.** Employees, leave balances, outages and policies, from one
-  deterministic generator. The policies in `data/policies` are fictional, written for
+  generator. The output is identical for the same as-of date, which is today unless given,
+  so the stack runs in any year. The policies in `data/policies` are fictional, written for
   testing, and are not legal advice.
 - **Identity from the session.** Tools read the employee from the request. The model
   never gives an employee id, and no tool accepts one.

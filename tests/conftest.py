@@ -5,12 +5,12 @@ cleanly when no database is reachable, so `make test` stays green without
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import psycopg
 import pytest
 from data.generate import (
-    GENERATED_AS_OF,
     generate_employees,
     generate_known_outages,
     generate_leave_balances,
@@ -20,6 +20,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from support_agent import util
 from support_agent.tools import policy_search
+
+# the date every test runs on, a Tuesday. The seed is generated as of this date too.
+TEST_TODAY = date(2026, 9, 22)
 
 INIT_SQL = (Path(__file__).resolve().parent.parent / "db" / "init.sql").read_text()
 
@@ -48,7 +51,7 @@ def fixed_today(monkeypatch):
     """Every test runs on the date the data was generated for, so leave dates in the
     tests never turn into dates in the past. A test can patch `util.get_today` again.
     """
-    monkeypatch.setattr(util, "get_today", lambda: GENERATED_AS_OF)
+    monkeypatch.setattr(util, "get_today", lambda: TEST_TODAY)
 
 
 @pytest.fixture(scope="session")
@@ -100,21 +103,22 @@ def seeded_db(clean_db):
     """The generated employees, balances, outages and policy chunks. Chunk number i
     (in generate_policy_chunks order) gets fake_vector(i).
     """
-    for e in generate_employees():
+    clean_db.execute("INSERT INTO seed_meta (as_of) VALUES (%s)", (TEST_TODAY,))
+    for e in generate_employees(TEST_TODAY):
         clean_db.execute(
             "INSERT INTO employees (id, name, role, employment_type, weekly_hours, country,"
             " hired_at) VALUES (%(id)s, %(name)s, %(role)s, %(employment_type)s,"
             " %(weekly_hours)s, %(country)s, %(hired_at)s)",
             e,
         )
-    for b in generate_leave_balances():
+    for b in generate_leave_balances(TEST_TODAY):
         clean_db.execute(
             "INSERT INTO leave_balances (employee_id, year, entitlement_days, taken_days,"
             " approved_days) VALUES (%(employee_id)s, %(year)s, %(entitlement_days)s,"
             " %(taken_days)s, %(approved_days)s)",
             b,
         )
-    for o in generate_known_outages():
+    for o in generate_known_outages(TEST_TODAY):
         clean_db.execute(
             "INSERT INTO known_outages (system, status, started_at, note)"
             " VALUES (%(system)s, %(status)s, %(started_at)s, %(note)s)",

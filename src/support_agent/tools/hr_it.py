@@ -41,7 +41,7 @@ def _read_leave_balance(cur: psycopg.Cursor, employee_id: str, year: int) -> dic
     ).fetchone()
 
 
-def get_leave_balance(year: int = 2026) -> str:
+def get_leave_balance(year: int | None = None) -> str:
     """Get the requester's vacation balance for a year: entitlement, days taken, days
     approved but not taken yet ("approved_days"), days that still wait for approval
     ("awaiting_approval_days") and days remaining.
@@ -51,9 +51,12 @@ def get_leave_balance(year: int = 2026) -> str:
     "remaining_if_all_approved" takes those out too. When "awaiting_approval_days" is more
     than 0, tell the requester about both numbers. Use this for any question about how
     much leave they have left.
+
+    year: the calendar year. Leave it out for the current year.
     """
     started_at = time.perf_counter()
     ctx = get_request_context()
+    year = year or util.get_today().year
     with db.transaction() as cur:
         row = _read_leave_balance(cur, ctx.employee_id, year)
     ref = f"leave_balances:{ctx.employee_id}:{year}"

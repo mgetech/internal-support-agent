@@ -1,11 +1,15 @@
+import re
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from data.generate import generate_employees, read_policies
-from eval.run_eval import SCENARIOS_DIR, Scenario, load_scenarios
+from eval.run_eval import SCENARIOS_DIR, Scenario, load_scenarios, render_request
 from pydantic import ValidationError
 
+from support_agent import util
 from support_agent.chunking import StructuralChunker
+from support_agent.tools.hr_it import calculate_working_days
 
 
 def _scenario(**expected: object) -> dict:
@@ -165,6 +169,64 @@ def test_every_cited_chunk_exists_in_the_policy_corpus():
     for scenario in load_scenarios().values():
         missing = set(scenario.expected.must_cite) - chunk_ids
         assert not missing, f"{scenario.id}: {sorted(missing)}"
+
+
+def test_date_tokens_become_a_working_week_at_least_n_weeks_ahead():
+    # 2026-09-22 is a Tuesday. Three weeks later is Tuesday October 13, so the first
+    # Monday that is at least 3 weeks ahead is October 19.
+    today = date(2026, 9, 22)
+
+    assert (
+        render_request("{monday_in_3_weeks} to {friday_in_3_weeks}", today)
+        == "October 19, 2026 to October 23, 2026"
+    )
+
+
+def test_date_tokens_skip_a_week_with_a_public_holiday():
+    # Good Friday is March 26 2027 and Easter Monday is March 29, so the weeks of
+    # March 22 and March 29 are skipped
+    today = date(2027, 3, 1)
+
+    assert (
+        render_request("{monday_in_3_weeks} to {friday_in_3_weeks}", today)
+        == "April 5, 2027 to April 9, 2027"
+    )
+
+
+def test_date_tokens_follow_the_clock(monkeypatch):
+    monkeypatch.setattr(util, "get_today", lambda: date(2026, 12, 30))
+
+    assert render_request("{monday_in_1_weeks}") == "January 11, 2027"
+
+
+def test_a_request_without_tokens_is_unchanged():
+    assert render_request("How many days do I have left?", date(2026, 9, 22)) == (
+        "How many days do I have left?"
+    )
+
+
+def test_an_unknown_date_token_is_rejected():
+    with pytest.raises(ValidationError, match="unknown date token"):
+        Scenario(**{**_scenario(), "request": "Book {tuesday_in_3_weeks}"})
+
+
+def test_the_leave_scenarios_have_five_working_days_on_any_day_of_the_year():
+    scenarios = load_scenarios()
+    pattern = re.compile(r"(\w+ \d+, \d{4}) to (\w+ \d+, \d{4})")
+
+    for scenario_id in ("S002", "S003"):
+        day = date(2026, 1, 1)
+        while day <= date(2030, 12, 31):
+            request = render_request(scenarios[scenario_id].request, day)
+            first, last = (
+                datetime.strptime(text, "%B %d, %Y").date()
+                for text in pattern.search(request).groups()
+            )
+            # a week with 5 working days, in one year, at least 3 weeks away
+            assert calculate_working_days(first, last) == 5, (scenario_id, day)
+            assert first.year == last.year, (scenario_id, day)
+            assert (first - day).days >= 21, (scenario_id, day)
+            day += timedelta(days=1)
 
 
 def test_loader_reads_files_by_id(tmp_path):

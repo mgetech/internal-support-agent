@@ -1,4 +1,4 @@
-.PHONY: setup lint format test db-up seed ui
+.PHONY: setup lint format test db-up reset-db seed ui
 
 VENV := .venv
 ifeq ($(OS),Windows_NT)
@@ -24,6 +24,13 @@ format:
 
 test:
 	$(PYTHON) -m pytest
+
+# delete the database volume, start a new database and seed it. Use it after a schema change,
+# because db/init.sql only runs on a new volume
+reset-db:
+	docker compose down -v
+	docker compose up -d --wait db
+	$(MAKE) seed
 
 # generate, truncate, load — safe to re-run any time
 seed:

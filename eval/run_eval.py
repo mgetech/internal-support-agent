@@ -5,13 +5,17 @@ scenario schema and the loader.
 
 from __future__ import annotations
 
+import calendar
 import re
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Self
 
+import holidays
 import yaml
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from support_agent import util
 from support_agent.feedback import Rating
 from support_agent.state import Outcome
 from support_agent.tools import TOOLS, is_gated_write
@@ -22,6 +26,14 @@ SCENARIOS_DIR = Path(__file__).resolve().parent / "scenarios"
 CHUNK_ID_RE = re.compile(r"^[a-z0-9-]+#[a-z0-9-]+#\d+$")
 SCENARIO_ID_RE = re.compile(r"^S\d{3}$")
 PERSONA_RE = re.compile(r"^emp_\d{3}$")
+
+# A request can name a date relative to today: `{monday_in_3_weeks}` is the Monday of the
+# first full working week that starts at least 3 weeks after today and has no German public
+# holiday. `{friday_in_3_weeks}` is the Friday of that same week. This keeps a scenario from
+# going out of date, and a week with no holiday has the same number of working days in any
+# year. Such a week never spans two years, because it would contain January 1.
+DATE_TOKEN_RE = re.compile(r"\{(monday|friday)_in_(\d+)_weeks\}")
+ANY_TOKEN_RE = re.compile(r"\{[^{}]*\}")
 
 TOOL_NAMES = {tool.__name__ for tool in TOOLS}
 WRITE_TOOL_NAMES = {tool.__name__ for tool in TOOLS if is_gated_write(tool)}
@@ -125,12 +137,48 @@ class Scenario(BaseModel):
             raise ValueError(f"persona must look like emp_001, got {value!r}")
         return value
 
+    @field_validator("request")
+    @classmethod
+    def _known_date_tokens(cls, value: str) -> str:
+        unknown = [t for t in ANY_TOKEN_RE.findall(value) if not DATE_TOKEN_RE.fullmatch(t)]
+        if unknown:
+            raise ValueError(f"unknown date token: {', '.join(unknown)}")
+        return value
+
     @field_validator("title", "request", "notes")
     @classmethod
     def _not_blank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("must not be blank")
         return value
+
+
+def get_working_week(weeks_ahead: int, today: date) -> tuple[date, date]:
+    """The Monday and Friday of the first week that starts at least `weeks_ahead` weeks
+    after `today` and has no German public holiday from Monday to Friday.
+    """
+    earliest = today + timedelta(weeks=weeks_ahead)
+    monday = earliest + timedelta(days=(7 - earliest.weekday()) % 7)
+    # national holidays only, the same as the leave tool counts them
+    public_holidays = holidays.country_holidays("DE", years=range(today.year, today.year + 3))
+    while any(monday + timedelta(days=n) in public_holidays for n in range(5)):
+        monday += timedelta(weeks=1)
+    return monday, monday + timedelta(days=4)
+
+
+def render_request(request: str, today: date | None = None) -> str:
+    """The request text with each date token replaced by a date, like "October 12, 2026".
+    `today` is `util.get_today()` unless given.
+    """
+    today = today or util.get_today()
+
+    def replace(match: re.Match[str]) -> str:
+        weekday, weeks_ahead = match.group(1), int(match.group(2))
+        monday, friday = get_working_week(weeks_ahead, today)
+        day = monday if weekday == "monday" else friday
+        return f"{calendar.month_name[day.month]} {day.day}, {day.year}"
+
+    return DATE_TOKEN_RE.sub(replace, request)
 
 
 def load_scenarios(directory: Path = SCENARIOS_DIR) -> dict[str, Scenario]:

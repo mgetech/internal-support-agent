@@ -1,11 +1,12 @@
 """Deterministic synthetic data: employees, leave balances, IT outages, plus
 reading the hand-authored HR/IT policy corpus and turning it into a seed.
 
-No randomness for the employee data — every row is planted, so two runs are
-byte-identical without needing an RNG seed. Entitlement is computed from the
-vacation policy rule (pre-/post-2024 contracts, part-time proration,
-first-year probation accrual) against a fixed reference date, never
-`date.today()`, so the output never drifts with wall-clock time.
+No randomness for the employee data — every row is planted, so two runs with the
+same `as_of` date are byte-identical without needing an RNG seed. The date defaults
+to today (`util.get_today`). Leave balances are written for the year of `as_of` and
+the year after, and outage dates are set relative to `as_of`, so the data is current
+in any year. Entitlement is computed from the vacation policy rule (pre-/post-2024
+contracts, part-time proration, first-year probation accrual) as of that date.
 
 The policy corpus itself (`data/policies/*.md`) is the source of truth, not
 generated — adding or editing a policy means editing its markdown file, the
@@ -19,26 +20,26 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
 import psycopg
 import yaml
 from pgvector.psycopg import register_vector
 
+from support_agent import util
 from support_agent.chunking import StructuralChunker
-from support_agent.db import get_pool
+from support_agent.db import fetch_one, get_pool
 from support_agent.embeddings import embed_texts
 
-YEAR = 2026
 POLICIES_DIR = Path(__file__).resolve().parent / "policies"
 SEED_SQL_PATH = Path(__file__).resolve().parent / "seed.sql"
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".embeddings-cache"
 EMBEDDING_MODEL = "text-embedding-3-small"
 
-# the date this dataset is generated "as of" — fixed, not date.today(), so
-# entitlement accrual (which depends on tenure) is stable across runs
-GENERATED_AS_OF = date(2026, 9, 22)
+# emp_006 is hired this many days before `as_of`, but never before January 1 of its
+# year, so the employee is in their first calendar year on any date
+EMP_006_DAYS_EMPLOYED = 83
 
 FULL_TIME_ENTITLEMENT_PRE_2024 = 30.0
 FULL_TIME_ENTITLEMENT_POST_2024 = 28.0
@@ -60,18 +61,23 @@ class _EmployeeProfile:
     approved_days: float = 0.0
 
 
+def _resolve_as_of(as_of: date | None) -> date:
+    return as_of or util.get_today()
+
+
 # the planted edge cases: emp_001 happy path, emp_003 part-time proration,
 # emp_004 over-balance, emp_005/emp_010 authorized approver roles, emp_006
 # first-year probation accrual, emp_012 zero remaining. The rest fill out
 # the roster of 12 with plausible history.
 # (id, name, role, employment_type, weekly_hours, country, hired_at, taken_days)
-_PROFILE_ROWS: list[tuple[str, str, str, str, float, str, date, float]] = [
+# emp_006's hire date is None here: `_get_profiles` sets it relative to `as_of`.
+_PROFILE_ROWS: list[tuple[str, str, str, str, float, str, date | None, float]] = [
     ("emp_001", "Anna Keller", "employee", "full_time", 40.0, "DE", date(2021, 3, 1), 12.0),
     ("emp_002", "Jonas Vogel", "employee", "full_time", 40.0, "DE", date(2022, 6, 15), 5.0),
     ("emp_003", "Mia Schuster", "employee", "part_time", 20.0, "DE", date(2023, 9, 1), 2.0),
     ("emp_004", "Paul Brandt", "employee", "full_time", 40.0, "DE", date(2020, 1, 10), 26.5),
     ("emp_005", "Laura Fink", "hr_partner", "full_time", 40.0, "DE", date(2019, 11, 1), 8.0),
-    ("emp_006", "Elif Yildiz", "employee", "full_time", 40.0, "DE", date(2026, 7, 1), 0.0),
+    ("emp_006", "Elif Yildiz", "employee", "full_time", 40.0, "DE", None, 0.0),
     ("emp_007", "Tobias Wagner", "employee", "full_time", 40.0, "DE", date(2022, 2, 1), 10.0),
     ("emp_008", "Sara Nowak", "employee", "full_time", 40.0, "DE", date(2021, 8, 15), 20.0),
     ("emp_009", "David Hoffmann", "employee", "full_time", 40.0, "DE", date(2024, 3, 1), 4.0),
@@ -79,7 +85,14 @@ _PROFILE_ROWS: list[tuple[str, str, str, str, float, str, date, float]] = [
     ("emp_011", "Felix Lorenz", "employee", "full_time", 40.0, "DE", date(2023, 1, 5), 7.0),
     ("emp_012", "Katrin Sommer", "employee", "full_time", 40.0, "DE", date(2017, 4, 1), 30.0),
 ]
-_PROFILES = [_EmployeeProfile(*row) for row in _PROFILE_ROWS]
+
+
+def _get_profiles(as_of: date) -> list[_EmployeeProfile]:
+    first_day_of_year = date(as_of.year, 1, 1)
+    emp_006_hired_at = max(as_of - timedelta(days=EMP_006_DAYS_EMPLOYED), first_day_of_year)
+    return [
+        _EmployeeProfile(*row[:6], row[6] or emp_006_hired_at, *row[7:]) for row in _PROFILE_ROWS
+    ]
 
 
 def _months_employed(hired_at: date, as_of: date) -> int:
@@ -89,12 +102,14 @@ def _months_employed(hired_at: date, as_of: date) -> int:
     return max(months, 0)
 
 
-def _entitlement_days(hired_at: date, employment_type: str, weekly_hours: float) -> float:
+def _entitlement_days(
+    hired_at: date, employment_type: str, weekly_hours: float, as_of: date
+) -> float:
     """Vacation-policy entitlement: pro-rata during the first year, else the
     flat full-time rate (post-2024 contracts get 28, earlier ones 30),
     prorated by weekly hours for part-time, rounded to the nearest half day.
     """
-    months_employed = _months_employed(hired_at, GENERATED_AS_OF)
+    months_employed = _months_employed(hired_at, as_of)
     if months_employed < PROBATION_MONTHS:
         base = months_employed * PROBATION_MONTHLY_ACCRUAL
     elif hired_at.year >= 2024:
@@ -107,7 +122,7 @@ def _entitlement_days(hired_at: date, employment_type: str, weekly_hours: float)
     return base
 
 
-def generate_employees() -> list[dict]:
+def generate_employees(as_of: date | None = None) -> list[dict]:
     return [
         {
             "id": p.id,
@@ -118,38 +133,57 @@ def generate_employees() -> list[dict]:
             "country": p.country,
             "hired_at": p.hired_at,
         }
-        for p in _PROFILES
+        for p in _get_profiles(_resolve_as_of(as_of))
     ]
 
 
-def generate_leave_balances(year: int = YEAR) -> list[dict]:
+def generate_leave_balances(as_of: date | None = None) -> list[dict]:
+    """Balances for the year of `as_of` and the year after, with the same numbers."""
+    as_of = _resolve_as_of(as_of)
     return [
         {
             "employee_id": p.id,
             "year": year,
-            "entitlement_days": _entitlement_days(p.hired_at, p.employment_type, p.weekly_hours),
+            "entitlement_days": _entitlement_days(
+                p.hired_at, p.employment_type, p.weekly_hours, as_of
+            ),
             "taken_days": p.taken_days,
             "approved_days": p.approved_days,
         }
-        for p in _PROFILES
+        for year in (as_of.year, as_of.year + 1)
+        for p in _get_profiles(as_of)
     ]
 
 
-def generate_known_outages() -> list[dict]:
+def _days_before(as_of: date, days: int, at: time) -> datetime:
+    return datetime.combine(as_of - timedelta(days=days), at, tzinfo=UTC)
+
+
+def generate_known_outages(as_of: date | None = None) -> list[dict]:
+    """The VPN outage is still open and started 2 days before `as_of`. The SSO outage
+    was resolved and started 12 days before.
+    """
+    as_of = _resolve_as_of(as_of)
     return [
         {
             "system": "vpn",
             "status": "identified",
-            "started_at": datetime(2026, 9, 20, 9, 15, tzinfo=UTC),
+            "started_at": _days_before(as_of, 2, time(9, 15)),
             "note": "certificate expiry on the VPN gateway; replacement certificate in progress",
         },
         {
             "system": "sso",
             "status": "resolved",
-            "started_at": datetime(2026, 9, 10, 14, 0, tzinfo=UTC),
+            "started_at": _days_before(as_of, 12, time(14, 0)),
             "note": "identity provider outage; resolved after failover to the secondary node",
         },
     ]
+
+
+def get_seed_as_of() -> date | None:
+    """The `as_of` date of the data in the database, or None if it was not seeded."""
+    row = fetch_one("SELECT as_of FROM seed_meta")
+    return row["as_of"] if row else None
 
 
 @dataclass(frozen=True)
@@ -262,6 +296,7 @@ def embed_policy_chunks(
 _EMPLOYEE_COLUMNS = ["id", "name", "role", "employment_type", "weekly_hours", "country", "hired_at"]
 _LEAVE_BALANCE_COLUMNS = ["employee_id", "year", "entitlement_days", "taken_days", "approved_days"]
 _OUTAGE_COLUMNS = ["system", "status", "started_at", "note"]
+_SEED_META_COLUMNS = ["as_of"]
 _POLICY_CHUNK_COLUMNS = [
     "id",
     "policy",
@@ -294,28 +329,33 @@ def _insert(table: str, columns: list[str], rows: list[dict]) -> str:
     return f"INSERT INTO {table} ({', '.join(columns)}) VALUES\n{values};\n"
 
 
-def render_seed_sql() -> str:
-    """The full seed as INSERT statements. `policy_chunks` rows carry every
-    column except `embedding` — vectors never enter this file; they're
-    attached from the on-disk cache when the seed is loaded into Postgres.
+def render_seed_sql(as_of: date | None = None) -> str:
+    """The full seed as INSERT statements. The same `as_of` date gives the same text.
+    `policy_chunks` rows carry every column except `embedding` — vectors never enter
+    this file; they're attached from the on-disk cache when the seed is loaded into
+    Postgres.
     """
+    as_of = _resolve_as_of(as_of)
     parts = [
         "-- generated by data/generate.py — do not edit by hand\n",
-        _insert("employees", _EMPLOYEE_COLUMNS, generate_employees()),
-        _insert("leave_balances", _LEAVE_BALANCE_COLUMNS, generate_leave_balances()),
-        _insert("known_outages", _OUTAGE_COLUMNS, generate_known_outages()),
+        _insert("seed_meta", _SEED_META_COLUMNS, [{"as_of": as_of}]),
+        _insert("employees", _EMPLOYEE_COLUMNS, generate_employees(as_of)),
+        _insert("leave_balances", _LEAVE_BALANCE_COLUMNS, generate_leave_balances(as_of)),
+        _insert("known_outages", _OUTAGE_COLUMNS, generate_known_outages(as_of)),
         _insert("policy_chunks", _POLICY_CHUNK_COLUMNS, generate_policy_chunks()),
     ]
     return "\n".join(part for part in parts if part)
 
 
-def write_seed_sql(output_path: Path = SEED_SQL_PATH) -> None:
-    output_path.write_text(render_seed_sql(), encoding="utf-8", newline="\n")
+def write_seed_sql(output_path: Path = SEED_SQL_PATH, as_of: date | None = None) -> None:
+    output_path.write_text(render_seed_sql(as_of), encoding="utf-8", newline="\n")
 
 
 def _load_into(conn: psycopg.Connection, sql: str, embeddings: dict[str, list[float]]) -> None:
     register_vector(conn)
-    conn.execute("TRUNCATE employees, leave_balances, known_outages, policy_chunks CASCADE")
+    conn.execute(
+        "TRUNCATE seed_meta, employees, leave_balances, known_outages, policy_chunks CASCADE"
+    )
     # no params here: psycopg sends a script with no bound parameters as a
     # single simple-query message, so Postgres itself parses statement
     # boundaries — unlike a naive split on `;`, that's safe even though some
@@ -325,13 +365,17 @@ def _load_into(conn: psycopg.Connection, sql: str, embeddings: dict[str, list[fl
         conn.execute("UPDATE policy_chunks SET embedding = %s WHERE id = %s", (vector, chunk_id))
 
 
-def load_seed_data(embed_fn: EmbedFn = embed_texts, conn: psycopg.Connection | None = None) -> None:
+def load_seed_data(
+    embed_fn: EmbedFn = embed_texts,
+    conn: psycopg.Connection | None = None,
+    as_of: date | None = None,
+) -> None:
     """Truncate the seeded tables and reload them from a freshly rendered
     seed, then attach embeddings from the on-disk cache. Truncating first is
     what makes this safe to re-run — every run starts from the same clean
     slate rather than accumulating duplicates.
     """
-    write_seed_sql()
+    write_seed_sql(as_of=as_of)
     sql = SEED_SQL_PATH.read_text(encoding="utf-8")
     embeddings = embed_policy_chunks(embed_fn=embed_fn)
 

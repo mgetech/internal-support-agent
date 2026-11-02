@@ -2,7 +2,7 @@
 generator must be deterministic — no wall-clock or RNG dependence.
 """
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from data.generate import (
@@ -11,6 +11,7 @@ from data.generate import (
     generate_known_outages,
     generate_leave_balances,
     generate_policy_chunks,
+    get_seed_as_of,
     load_seed_data,
     read_policies,
     render_seed_sql,
@@ -52,7 +53,8 @@ def test_emp_003_part_time_prorated_to_fifteen_days():
     assert _balance("emp_003")["entitlement_days"] == 15
 
 
-def test_emp_006_hired_2026_07_accrues_pro_rata():
+def test_emp_006_accrues_pro_rata_on_the_test_date():
+    # the test date is 2026-09-22, 83 days after the hire date
     employees = {e["id"]: e for e in generate_employees()}
 
     assert employees["emp_006"]["hired_at"] == date(2026, 7, 1)
@@ -86,10 +88,90 @@ def test_one_active_vpn_outage_and_one_resolved_sso_incident():
     assert sso["status"] == "resolved"
 
 
-def test_generation_is_deterministic():
-    assert generate_employees() == generate_employees()
-    assert generate_leave_balances() == generate_leave_balances()
-    assert generate_known_outages() == generate_known_outages()
+def test_generation_is_the_same_for_the_same_date():
+    as_of = date(2027, 5, 17)
+
+    assert generate_employees(as_of) == generate_employees(as_of)
+    assert generate_leave_balances(as_of) == generate_leave_balances(as_of)
+    assert generate_known_outages(as_of) == generate_known_outages(as_of)
+
+
+def test_generation_follows_the_clock_when_no_date_is_given():
+    # the tests fixture sets util.get_today to 2026-09-22
+    assert generate_known_outages() == generate_known_outages(date(2026, 9, 22))
+
+
+# --- the data is current on any date ---
+
+# early, middle and late in one year, and a year other than the default one
+YEAR_2027 = [date(2027, 1, 2), date(2027, 6, 30), date(2027, 12, 28)]
+
+
+def _balance_at(employee_id: str, as_of: date, year: int | None = None) -> dict:
+    year = year or as_of.year
+    return next(
+        b
+        for b in generate_leave_balances(as_of)
+        if b["employee_id"] == employee_id and b["year"] == year
+    )
+
+
+@pytest.mark.parametrize("as_of", YEAR_2027)
+def test_the_planted_balances_are_the_same_on_any_date(as_of):
+    assert _remaining(_balance_at("emp_001", as_of)) == 18
+    assert _balance_at("emp_001", as_of)["entitlement_days"] == 30
+    assert _remaining(_balance_at("emp_004", as_of)) == 3.5
+    assert _remaining(_balance_at("emp_012", as_of)) == 0
+    assert _balance_at("emp_003", as_of)["entitlement_days"] == 15
+
+
+@pytest.mark.parametrize("as_of", YEAR_2027)
+def test_balances_are_written_for_this_year_and_the_next(as_of):
+    balances = generate_leave_balances(as_of)
+
+    assert {b["year"] for b in balances} == {as_of.year, as_of.year + 1}
+    assert len(balances) == 24
+    for employee_id in ("emp_001", "emp_004", "emp_006"):
+        this_year = _balance_at(employee_id, as_of)
+        next_year = _balance_at(employee_id, as_of, as_of.year + 1)
+        assert {**this_year, "year": 0} == {**next_year, "year": 0}
+
+
+@pytest.mark.parametrize("as_of", YEAR_2027)
+def test_emp_006_is_in_their_first_calendar_year(as_of):
+    employee = next(e for e in generate_employees(as_of) if e["id"] == "emp_006")
+    hired_at = employee["hired_at"]
+
+    assert hired_at.year == as_of.year
+    assert hired_at <= as_of
+    # entitlement accrues 2.5 days for each completed month and is never negative
+    months = (as_of.year - hired_at.year) * 12 + as_of.month - hired_at.month
+    months -= as_of.day < hired_at.day
+    assert _balance_at("emp_006", as_of)["entitlement_days"] == months * 2.5
+
+
+@pytest.mark.parametrize("as_of", YEAR_2027)
+def test_the_vpn_outage_is_active_and_the_sso_outage_is_resolved(as_of):
+    outages = {o["system"]: o for o in generate_known_outages(as_of)}
+
+    assert outages["vpn"]["status"] != "resolved"
+    assert outages["vpn"]["started_at"].date() == as_of - timedelta(days=2)
+    assert outages["sso"]["status"] == "resolved"
+    assert outages["sso"]["started_at"].date() == as_of - timedelta(days=12)
+
+
+def test_the_same_date_gives_byte_identical_seed_sql():
+    assert render_seed_sql(date(2027, 6, 30)) == render_seed_sql(date(2027, 6, 30))
+
+
+def test_another_date_gives_another_seed_sql():
+    assert render_seed_sql(date(2027, 6, 30)) != render_seed_sql(date(2028, 6, 30))
+
+
+def test_the_seed_sql_records_its_date():
+    sql = render_seed_sql(date(2027, 6, 30))
+
+    assert "INSERT INTO seed_meta (as_of) VALUES\n    ('2027-06-30');" in sql
 
 
 def test_five_policies_with_expected_ids_and_domains():
@@ -196,9 +278,10 @@ def test_embed_policy_chunks_caches_and_skips_already_embedded_content(tmp_path)
     assert (tmp_path / "fake.json").exists()
 
 
-def test_render_seed_sql_contains_all_four_tables():
+def test_render_seed_sql_contains_every_seeded_table():
     sql = render_seed_sql()
 
+    assert "INSERT INTO seed_meta" in sql
     assert "INSERT INTO employees" in sql
     assert "INSERT INTO leave_balances" in sql
     assert "INSERT INTO known_outages" in sql
@@ -218,14 +301,14 @@ def test_render_seed_sql_escapes_single_quotes():
 
 
 def test_render_seed_sql_is_deterministic():
-    assert render_seed_sql() == render_seed_sql()
+    assert render_seed_sql(date(2026, 9, 22)) == render_seed_sql(date(2026, 9, 22))
 
 
 def test_write_seed_sql_matches_render(tmp_path):
     output = tmp_path / "seed.sql"
-    write_seed_sql(output)
+    write_seed_sql(output, date(2026, 9, 22))
 
-    assert output.read_text(encoding="utf-8") == render_seed_sql()
+    assert output.read_text(encoding="utf-8") == render_seed_sql(date(2026, 9, 22))
 
 
 def _fake_embed(texts):
@@ -251,3 +334,11 @@ def test_load_seed_data_is_safe_to_run_twice(clean_db):
 
     assert clean_db.execute("SELECT count(*) FROM employees").fetchone()[0] == 12
     assert clean_db.execute("SELECT count(*) FROM policy_chunks").fetchone()[0] == 16
+
+
+def test_the_seed_date_can_be_read_back_from_the_database(clean_db):
+    assert get_seed_as_of() is None
+
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db, as_of=date(2027, 6, 30))
+
+    assert get_seed_as_of() == date(2027, 6, 30)

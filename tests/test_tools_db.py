@@ -9,10 +9,9 @@ import json
 from datetime import date
 
 import pytest
-from data.generate import GENERATED_AS_OF
 from tests.tool_args import sample_args
 
-from support_agent import audit
+from support_agent import audit, util
 from support_agent.request_context import bind_request_context
 from support_agent.tools import (
     TOOLS,
@@ -143,7 +142,7 @@ def test_a_range_over_a_weekend_does_not_count_it(seeded_db):
 
 def test_a_request_can_start_today(seeded_db):
     # the fixed test date is Tuesday 2026-09-22
-    result = _as("emp_001", submit_leave_request, GENERATED_AS_OF, GENERATED_AS_OF)
+    result = _as("emp_001", submit_leave_request, util.get_today(), util.get_today())
 
     assert result["proposed"] is True
     assert result["working_days"] == 1
@@ -306,3 +305,15 @@ def test_every_tool_call_is_audited_and_recorded(fn: Tool, seeded_db, search_emb
     assert [(e["type"], e["tool"]) for e in ctx.evidence] == [("tool_result", fn.__name__)]
     # the evidence and the audit event have the same time, and it is not negative
     assert ctx.evidence[0]["latency_ms"] == rows[0][2] >= 0
+
+
+def test_leave_balance_year_defaults_to_the_current_year(seeded_db, monkeypatch):
+    # the seed has the year of the test date (2026) and the year after
+    assert _as("emp_001", get_leave_balance)["year"] == 2026
+
+    monkeypatch.setattr(util, "get_today", lambda: date(2027, 1, 4))
+    assert _as("emp_001", get_leave_balance)["year"] == 2027
+    assert _as("emp_001", get_leave_balance)["remaining_days"] == 18.0
+
+    monkeypatch.setattr(util, "get_today", lambda: date(2025, 3, 1))
+    assert "error" in _as("emp_001", get_leave_balance)

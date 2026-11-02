@@ -64,9 +64,26 @@ it hands the request to a person.
 ## Data
 
 All data is synthetic and comes from one deterministic generator (`data/generate.py`):
-12 employees with leave balances, two IT outages and five HR and IT policies. The same
-run always gives the same data. Some edge cases are planted on purpose, such as an
-employee with no days left.
+12 employees with leave balances, two IT outages and five HR and IT policies. Some edge
+cases are planted on purpose, such as an employee with no days left.
+
+**The seed follows its date.** The generator takes an `as_of` date, which is today unless
+given (`make seed` always uses today). The same `as_of` date gives byte-identical output.
+There is no date setting, and the stack runs in any year:
+
+- Leave balances are written for the year of `as_of` and the year after, with the same
+  numbers in both. Anna Keller (`emp_001`) always has 18 days left and Paul Brandt
+  (`emp_004`) 3.5.
+- Elif Yildiz (`emp_006`) is hired 83 days before `as_of`, but never before January 1, so
+  she is in her first calendar year on any date. Her entitlement is 2.5 days for each
+  completed month, which is 0 in the first month of the year.
+- The open VPN outage started 2 days before `as_of` and the resolved SSO outage 12 days
+  before.
+- The date is saved in the one-row table `seed_meta`, so a reader can tell which date a
+  database was seeded for (`get_seed_as_of()` in `data/generate.py`).
+
+All code gets today's date from `util.get_today()`, which tests replace with a fixed date.
+`get_leave_balance` uses its year when the model gives none.
 
 A heading-aware chunker splits each policy into sections. A chunk id has the form
 `<policy>#<heading-slug>#<n>`, for example `vacation-policy#entitlement#0`. Citations and
