@@ -120,12 +120,12 @@ Rough build order:
 | CI | GitHub Actions — ruff + pytest always; eval gate when model secrets are configured | Partial — lint and tests |
 | Packaging | Docker + docker-compose (db, api, ui) | Partial — db only |
 | Orchestration | **LangGraph** | Partial — graph built, served by `POST /chat` and tested with a scripted model |
-| Model inference | **Azure OpenAI via AI Foundry** — a capable deployment for the agent loop, a small one for classification and claim extraction, `text-embedding-3-small` (1536-dim) | Partial — embeddings, and a model client with retry, fallback and cost; the graph uses the client, but only scripted replies are tested, with no live model run |
+| Model inference | **Azure OpenAI via AI Foundry** — a capable deployment for the agent loop, a small one for classification and claim extraction, `text-embedding-3-small` (1536-dim) | Partial — embeddings, and a model client with retry, fallback and cost; the graph uses the client; tests use scripted replies, and the six eval scenarios have also run against a live model |
 | API | FastAPI | Partial — see [REST API](#rest-api); login is a header stub |
 | Retrieval | Metadata pre-filtering → hybrid pgvector cosine + Postgres full-text ranking (`ts_rank_cd`), reciprocal-rank fusion (k=60), top-5 | Partial — hybrid search in place; metadata pre-filtering planned |
 | Chunking | Pluggable `Chunker` interface; structural (heading-aware) default, chosen by ablation against fixed-size, recursive and semantic | Partial — structural chunker only |
 | MCP | Official Python MCP SDK (FastMCP) exposing the tool belt; stdio + streamable HTTP | Planned |
-| Eval tooling | Own deterministic harness (gates, trajectory, retrieval) + **RAGAS** for answer quality | Planned |
+| Eval tooling | Own deterministic harness (gates, trajectory, retrieval) + **RAGAS** for answer quality | Partial — six scenarios and a deterministic runner (`make eval`, one run each); gate, n=3 and RAGAS planned. See [docs/evaluation.md](docs/evaluation.md) |
 | Observability | **Langfuse** (cloud keys via `.env`; self-hostable for residency) | Planned |
 | UI | Streamlit — chat, approval queue, decision records, cost | Partial — chat, my requests, approval queue and decision records tabs (`make ui`); the cost tab is planned |
 
