@@ -6,24 +6,36 @@ the real tools on the seeded database.
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import pytest
+from data.generate import calculate_index_build_id, generate_policy_chunks
 from eval import run_eval
 from eval.run_eval import (
+    Check,
+    Header,
+    Result,
     Run,
     Scenario,
     check_run,
+    format_results,
+    get_error_result,
+    get_header,
     get_identity_parameters,
+    get_result,
     load_scenarios,
     main,
     run_scenario,
 )
 from fastapi.testclient import TestClient
+from tests.conftest import TEST_TODAY
 from tests.graph_helpers import CLASSIFIED, ScriptedLLM, call_reply, text_reply
 
 from support_agent.api import app, get_graph
 from support_agent.decision_record import DecisionRecord
 from support_agent.graph import build_graph
+from support_agent.prompts import prompt_versions
+from support_agent.tools.policy_search import get_policy_version
 
 CHUNK = "vacation-policy#entitlement#0"
 
@@ -398,3 +410,165 @@ def test_s006_sends_the_feedback_and_checks_that_it_was_saved(api, seeded_db):
         "SELECT request_id, rating, comment FROM feedback WHERE id = %s", (run.feedback_id,)
     ).fetchone()
     assert tuple(row) == (run.request_id, "down", "smoke test")
+
+
+# --- the results table ---
+
+
+def _result(**overrides: object) -> Result:
+    fields = {
+        "scenario_id": "S001",
+        "title": "Leave balance query",
+        "expected_outcome": "resolve",
+        "actual_outcome": "resolve",
+        "passed": True,
+        "total_tokens": 1200,
+        "total_cost_eur": 0.0123,
+        "latency_ms": 4500,
+    }
+    return Result(**{**fields, **overrides})
+
+
+def _header(**overrides: object) -> Header:
+    fields = {
+        "seed_as_of": date(2026, 11, 3),
+        "index_build_id": "a1b2c3d4e5f6",
+        "policy_version": "expense-policy@2026-09.1; it-access-policy@2026-11.1",
+        "prompt_versions": {"agent_system": "1.3.0", "classifier": "1.0.0"},
+    }
+    return Header(**{**fields, **overrides})
+
+
+def test_the_table_has_a_header_a_row_per_scenario_and_a_total():
+    results = [
+        _result(),
+        _result(
+            scenario_id="S003",
+            title="Over balance",
+            expected_outcome="refuse_with_citation",
+            actual_outcome="resolve",
+            passed=False,
+            total_tokens=800,
+            total_cost_eur=0.01,
+            latency_ms=3000,
+            failed_checks=["outcome", "must_cite"],
+        ),
+    ]
+
+    table = format_results(_header(), results).splitlines()
+
+    assert table[0] == "# Eval results"
+    assert "- Seed as of: 2026-11-03" in table
+    assert "- Index build id: a1b2c3d4e5f6" in table
+    assert "- Policy versions: expense-policy@2026-09.1; it-access-policy@2026-11.1" in table
+    assert "- Prompt versions: agent_system 1.3.0, classifier 1.0.0" in table
+    assert "- Runs per scenario: 1" in table
+    assert (
+        "| S001 Leave balance query | resolve | resolve | yes | 1200 | 0.0123 | 4500 | - |" in table
+    )
+    assert (
+        "| S003 Over balance | refuse_with_citation | resolve | no | 800 | 0.0100 | 3000 "
+        "| outcome, must_cite |" in table
+    )
+    assert "1 of 2 passed. Tokens 2000, EUR 0.0223." in table
+
+
+def test_the_table_says_unknown_for_a_header_value_it_does_not_have():
+    header = _header(seed_as_of=None, index_build_id=None, policy_version=None, prompt_versions={})
+
+    table = format_results(header, [_result()])
+
+    assert "- Seed as of: unknown" in table
+    assert "- Index build id: unknown" in table
+    assert "- Policy versions: unknown" in table
+    assert "- Prompt versions: unknown" in table
+
+
+def test_a_result_takes_tokens_cost_latency_and_prompt_versions_from_the_record():
+    record = _record(
+        total_tokens=900,
+        total_cost_eur=0.02,
+        latency_ms=2500,
+        prompt_versions={"agent_system": "1.3.0"},
+    )
+    checks = [Check(name="outcome", passed=True), Check(name="must_call", passed=False)]
+
+    result = get_result(_scenario(), _run(record=record), checks)
+
+    assert (result.total_tokens, result.total_cost_eur, result.latency_ms) == (900, 0.02, 2500)
+    assert result.prompt_versions == {"agent_system": "1.3.0"}
+    assert result.failed_checks == ["must_call"]
+    assert not result.passed
+
+
+def test_a_result_without_a_record_has_zero_cost():
+    result = get_result(
+        _scenario(), _run(record=None), [Check(name="decision_record", passed=False)]
+    )
+
+    assert (result.total_tokens, result.total_cost_eur, result.latency_ms) == (0, 0.0, 0)
+
+
+def test_an_error_result_fails_and_names_the_request():
+    result = get_error_result(_scenario())
+
+    assert (result.actual_outcome, result.passed, result.failed_checks) == (
+        "error",
+        False,
+        ["request"],
+    )
+
+
+def test_the_header_names_the_seed_the_index_and_the_policies(seeded_db):
+    header = get_header([_result(prompt_versions={"agent_system": "1.3.0"})])
+
+    assert header.seed_as_of == TEST_TODAY
+    assert header.index_build_id == calculate_index_build_id(
+        generate_policy_chunks(), "test-embedding"
+    )
+    assert header.policy_version == get_policy_version()
+    assert header.policy_version.startswith("expense-policy@")
+    assert header.prompt_versions == {"agent_system": "1.3.0"}
+
+
+def test_the_header_falls_back_to_the_prompt_versions_on_disk(seeded_db):
+    header = get_header([_result()])
+
+    assert header.prompt_versions == prompt_versions()
+
+
+def test_main_writes_the_table_and_returns_zero_when_every_scenario_passes(
+    api, monkeypatch, tmp_path, capsys
+):
+    _script(api, CLASSIFIED, call_reply("c1", "get_leave_balance", "{}"), text_reply("18.0 left."))
+    monkeypatch.setattr(run_eval, "get_client", lambda api_url: api)
+    output = tmp_path / "results" / "latest.md"
+
+    exit_code = main(["S001", "--output", str(output)])
+
+    assert exit_code == 0
+    table = output.read_text(encoding="utf-8")
+    assert "| S001 Leave balance query | resolve | resolve | yes |" in table
+    assert f"- Seed as of: {TEST_TODAY}" in table
+    assert "1 of 1 passed" in capsys.readouterr().out
+
+
+def test_main_returns_one_and_names_the_failed_checks_when_a_scenario_fails(
+    api, search_embeds_like, monkeypatch, tmp_path, capsys
+):
+    search_embeds_like(CHUNK)
+    _script(
+        api,
+        CLASSIFIED,
+        call_reply("c1", "search_policies", '{"query": "vacation days"}'),
+        call_reply("c2", "get_leave_balance", "{}"),
+        text_reply("18.0 left."),
+    )
+    monkeypatch.setattr(run_eval, "get_client", lambda api_url: api)
+    output = tmp_path / "latest.md"
+
+    exit_code = main(["S001", "--output", str(output)])
+
+    assert exit_code == 1
+    assert "| no |" in output.read_text(encoding="utf-8")
+    assert "FAIL S001" in capsys.readouterr().out

@@ -1,4 +1,4 @@
-.PHONY: setup lint format test db-up reset-db seed ui
+.PHONY: setup lint format test db-up reset-db seed ui eval
 
 VENV := .venv
 ifeq ($(OS),Windows_NT)
@@ -38,3 +38,8 @@ seed:
 
 ui:
 	$(PYTHON) -m streamlit run ui/app.py
+
+# run every scenario against the API at http://localhost:8000 and write eval/results/latest.md.
+# Start the API first. Pass other options with ARGS, for example: make eval ARGS="S001"
+eval:
+	$(PYTHON) -m eval.run_eval $(ARGS)

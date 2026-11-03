@@ -21,6 +21,7 @@ from typing import Any, Self
 import holidays
 import httpx
 import yaml
+from data.generate import get_seed_as_of
 from langchain_core.utils.function_calling import convert_to_openai_function
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
@@ -28,10 +29,14 @@ from support_agent import db, util
 from support_agent.decision_record import DecisionRecord
 from support_agent.feedback import Rating
 from support_agent.guardrails.verifier import CITATIONS_CHECK, parse_citations
+from support_agent.prompts import prompt_versions
 from support_agent.state import Outcome
 from support_agent.tools import TOOLS, is_gated_write
+from support_agent.tools.policy_search import get_index_build_id, get_policy_version
 
 SCENARIOS_DIR = Path(__file__).resolve().parent / "scenarios"
+# the table of the last run, overwritten each time. It is not committed.
+RESULTS_FILE = Path(__file__).resolve().parent / "results" / "latest.md"
 
 # The employee who reads the Decision Records. Only an HR partner can.
 RECORD_READER = "emp_005"
@@ -483,13 +488,126 @@ def check_run(scenario: Scenario, run: Run) -> list[Check]:
     return checks
 
 
+class Result(BaseModel):
+    """One row of the results table."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    scenario_id: str
+    title: str
+    expected_outcome: str
+    # "error" when the API could not run the request
+    actual_outcome: str
+    passed: bool
+    # tokens, cost and latency come from the Decision Record
+    total_tokens: int = 0
+    total_cost_eur: float = 0.0
+    latency_ms: int = 0
+    failed_checks: list[str] = []
+    prompt_versions: dict[str, str] = {}
+
+
+def get_result(scenario: Scenario, run: Run, checks: list[Check]) -> Result:
+    failed = [c.name for c in checks if not c.passed]
+    record = run.record
+    return Result(
+        scenario_id=scenario.id,
+        title=scenario.title,
+        expected_outcome=scenario.expected.outcome,
+        actual_outcome=run.outcome,
+        passed=not failed,
+        total_tokens=record.total_tokens if record else 0,
+        total_cost_eur=record.total_cost_eur if record else 0.0,
+        latency_ms=record.latency_ms if record else 0,
+        failed_checks=failed,
+        prompt_versions=record.prompt_versions if record else {},
+    )
+
+
+def get_error_result(scenario: Scenario) -> Result:
+    return Result(
+        scenario_id=scenario.id,
+        title=scenario.title,
+        expected_outcome=scenario.expected.outcome,
+        actual_outcome="error",
+        passed=False,
+        failed_checks=["request"],
+    )
+
+
+class Header(BaseModel):
+    """What the results were measured on. Two result files are comparable only when these
+    match.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # None when the database was not seeded
+    seed_as_of: date | None
+    index_build_id: str | None
+    policy_version: str | None
+    prompt_versions: dict[str, str]
+
+
+def get_header(results: list[Result]) -> Header:
+    """The header for these results. The seed and the policies are read from the
+    database. The prompt versions are the ones the records name, so they are the versions
+    that ran. Without a record that names one, they are the versions on disk.
+    """
+    versions: dict[str, str] = {}
+    for result in results:
+        versions.update(result.prompt_versions)
+    return Header(
+        seed_as_of=get_seed_as_of(),
+        index_build_id=get_index_build_id(),
+        policy_version=get_policy_version(),
+        prompt_versions=versions or prompt_versions(),
+    )
+
+
+def format_results(header: Header, results: list[Result]) -> str:
+    """The results as markdown: the header, one table row per scenario, and a total."""
+    unknown = "unknown"
+    versions = ", ".join(f"{name} {version}" for name, version in header.prompt_versions.items())
+    lines = [
+        "# Eval results",
+        "",
+        f"- Seed as of: {header.seed_as_of or unknown}",
+        f"- Index build id: {header.index_build_id or unknown}",
+        f"- Policy versions: {header.policy_version or unknown}",
+        f"- Prompt versions: {versions or unknown}",
+        "- Runs per scenario: 1",
+        "",
+        "| Scenario | Expected outcome | Actual outcome | Pass | Tokens | EUR | Latency ms |"
+        " Failed checks |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for r in results:
+        lines.append(
+            f"| {r.scenario_id} {r.title} | {r.expected_outcome} | {r.actual_outcome} "
+            f"| {'yes' if r.passed else 'no'} | {r.total_tokens} | {r.total_cost_eur:.4f} "
+            f"| {r.latency_ms} | {', '.join(r.failed_checks) or '-'} |"
+        )
+    passed = sum(r.passed for r in results)
+    tokens = sum(r.total_tokens for r in results)
+    cost = sum(r.total_cost_eur for r in results)
+    lines += ["", f"{passed} of {len(results)} passed. Tokens {tokens}, EUR {cost:.4f}.", ""]
+    return "\n".join(lines)
+
+
+def get_client(api_url: str) -> httpx.Client:
+    """The client for the API. A model run can take a while, so the timeout is long."""
+    return httpx.Client(base_url=api_url, timeout=180)
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Run the scenarios against the API and print one result per scenario. Returns 1 if
-    any scenario failed.
+    """Run the scenarios against the API, print one result per scenario and write the
+    results table to a file. Returns 1 if any scenario failed.
     """
     parser = argparse.ArgumentParser(description="Run the scenarios against a running API.")
     parser.add_argument("scenario_ids", nargs="*", help="run only these, for example S001")
     parser.add_argument("--api-url", default="http://localhost:8000")
+    parser.add_argument("--output", type=Path, default=RESULTS_FILE, help="the results file")
     args = parser.parse_args(argv)
 
     scenarios = load_scenarios()
@@ -497,23 +615,29 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         parser.error(f"unknown scenario: {', '.join(unknown)}")
 
-    failed = 0
-    # a model run can take a while
-    with httpx.Client(base_url=args.api_url, timeout=180) as client:
+    results: list[Result] = []
+    with get_client(args.api_url) as client:
         for scenario_id in args.scenario_ids or scenarios:
             scenario = scenarios[scenario_id]
             try:
-                checks = check_run(scenario, run_scenario(client, scenario))
+                run = run_scenario(client, scenario)
             except httpx.HTTPError as error:
                 print(f"ERROR {scenario_id} {scenario.title}\n  - {error}")
-                failed += 1
+                results.append(get_error_result(scenario))
                 continue
-            problems = [c for c in checks if not c.passed]
-            print(f"{'FAIL' if problems else 'PASS'} {scenario_id} {scenario.title}")
-            for check in problems:
-                print(f"  - {check.name}: {check.detail}")
-            failed += bool(problems)
-    return 1 if failed else 0
+            checks = check_run(scenario, run)
+            results.append(get_result(scenario, run, checks))
+            print(f"{'PASS' if results[-1].passed else 'FAIL'} {scenario_id} {scenario.title}")
+            for check in checks:
+                if not check.passed:
+                    print(f"  - {check.name}: {check.detail}")
+
+    table = format_results(get_header(results), results)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(table, encoding="utf-8")
+    passed = sum(r.passed for r in results)
+    print(f"{passed} of {len(results)} passed. Results are in {args.output}")
+    return 0 if passed == len(results) else 1
 
 
 if __name__ == "__main__":
