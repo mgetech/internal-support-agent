@@ -1,0 +1,14 @@
+.git
+.github
+.idea
+.venv
+.env
+.pytest_cache
+.ruff_cache
+.embeddings-cache
+__pycache__
+*.py[cod]
+data/seed.sql
+eval
+tests
+docs

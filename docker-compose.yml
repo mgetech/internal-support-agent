@@ -1,3 +1,14 @@
+# Start with: cp .env.example .env, fill in the Azure values, then docker compose up.
+# Startup order: db is healthy -> seed runs once and exits -> api is healthy -> ui.
+
+x-app: &app
+  build: .
+  image: internal-support-agent
+  env_file: .env
+  environment:
+    # inside the compose network the database is reached by its service name
+    DATABASE_URL: postgresql://support_agent:support_agent@db:5432/support_agent
+
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -9,6 +20,7 @@ services:
       - "${DB_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # the schema is applied when the volume is new
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U support_agent -d support_agent"]
@@ -16,5 +28,73 @@ services:
       timeout: 5s
       retries: 10
 
+  # loads the seed data on the first start only. A second load would truncate employees
+  # and, with them, every request, action and Decision Record.
+  seed:
+    <<: *app
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - embeddings:/app/.embeddings-cache
+    command:
+      - python
+      - -c
+      - |
+        from data.generate import load_seed_data
+        from support_agent.db import fetch_one
+
+        if fetch_one("SELECT 1 FROM seed_meta"):
+            print("The database is already seeded.")
+        else:
+            load_seed_data()
+            print("Seed data loaded.")
+
+  api:
+    <<: *app
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json')"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  ui:
+    <<: *app
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      API_URL: http://api:8000
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+    ports:
+      - "${UI_PORT:-8501}:8501"
+    command:
+      - streamlit
+      - run
+      - ui/app.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   pgdata:
+  embeddings:
