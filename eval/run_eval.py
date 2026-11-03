@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import re
+from collections import Counter
 from collections.abc import Iterator
 from datetime import date, timedelta
 from pathlib import Path
@@ -23,9 +24,10 @@ import yaml
 from langchain_core.utils.function_calling import convert_to_openai_function
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from support_agent import util
+from support_agent import db, util
 from support_agent.decision_record import DecisionRecord
 from support_agent.feedback import Rating
+from support_agent.guardrails.verifier import CITATIONS_CHECK, parse_citations
 from support_agent.state import Outcome
 from support_agent.tools import TOOLS, is_gated_write
 
@@ -227,8 +229,9 @@ class Run(BaseModel):
     request_id: str
     answer: str
     outcome: Outcome
-    record: DecisionRecord
-    # the tools called, in order, from the evidence of the Decision Record
+    # None when the API has no Decision Record for the request
+    record: DecisionRecord | None
+    # the tools called, in order, from the audit log. The record is checked against it.
     tools_called: list[str]
     # the write tools the request proposed, from the caller's own actions
     proposed_actions: list[str]
@@ -246,9 +249,27 @@ class Check(BaseModel):
     detail: str = ""
 
 
+def get_audited_tool_calls(request_id: str) -> list[str]:
+    """The tools the request called, in order, from the `tool_call` events of the audit
+    log. This reads the database that the API writes to, so it needs `DATABASE_URL`.
+    """
+    rows = db.fetch_all(
+        """
+        SELECT payload->>'tool' AS tool
+        FROM audit_log
+        WHERE request_id = %s AND event = 'tool_call'
+        ORDER BY id
+        """,
+        (request_id,),
+    )
+    return [row["tool"] for row in rows]
+
+
 def run_scenario(client: httpx.Client, scenario: Scenario, today: date | None = None) -> Run:
-    """Send the request as the persona, then read back the Decision Record and the actions
-    it proposed. Raises httpx.HTTPStatusError if the API answers with an error.
+    """Send the request as the persona, then read back the Decision Record, the audit log
+    and the actions it proposed. Raises httpx.HTTPStatusError if the API answers with an
+    error. A missing Decision Record is not an error here: the run has no record, and the
+    `decision_record` check fails.
     """
     as_persona = {"X-Employee-Id": scenario.persona}
     chat = client.post(
@@ -259,8 +280,10 @@ def run_scenario(client: httpx.Client, scenario: Scenario, today: date | None = 
     request_id = answer["request_id"]
 
     response = client.get(f"/decisions/{request_id}", headers={"X-Employee-Id": RECORD_READER})
-    response.raise_for_status()
-    record = DecisionRecord.model_validate(response.json())
+    record = None
+    if response.status_code != 404:
+        response.raise_for_status()
+        record = DecisionRecord.model_validate(response.json())
 
     response = client.get("/me/actions", headers=as_persona, params={"limit": 200})
     response.raise_for_status()
@@ -283,7 +306,7 @@ def run_scenario(client: httpx.Client, scenario: Scenario, today: date | None = 
         answer=answer["answer"],
         outcome=answer["outcome"],
         record=record,
-        tools_called=[i["tool"] for i in record.evidence if i["type"] == "tool_result"],
+        tools_called=get_audited_tool_calls(request_id),
         proposed_actions=proposed,
         feedback_id=feedback_id,
     )
@@ -316,16 +339,76 @@ def get_identity_parameters() -> list[str]:
     return found
 
 
+def get_retrieved_chunk_ids(record: DecisionRecord) -> set[str]:
+    """The chunk ids that the `search_policies` calls of the request returned, from the
+    evidence of the record.
+    """
+    ids: set[str] = set()
+    for item in record.evidence:
+        is_search = item["type"] == "tool_result" and item["tool"] == "search_policies"
+        if is_search and isinstance(item["ref"], list):
+            ids.update(chunk["id"] for chunk in item["ref"])
+    return ids
+
+
+def _citation_problems(run: Run) -> list[str]:
+    """Every citation in the answer, and in the record, must be a chunk that the request
+    retrieved. The runner checks this again, apart from the verifier in the graph.
+    """
+    retrieved = get_retrieved_chunk_ids(run.record) if run.record else set()
+    problems = [
+        f"the answer cites {chunk_id}, which the request did not retrieve"
+        for chunk_id in parse_citations(run.answer)
+        if chunk_id not in retrieved
+    ]
+    if run.record:
+        problems += [
+            f"the record cites {chunk_id}, which the request did not retrieve"
+            for chunk_id in run.record.citations
+            if chunk_id not in retrieved
+        ]
+    return problems
+
+
+def _record_problems(run: Run) -> list[str]:
+    """The record must exist, say why in a sentence, have evidence, agree with the answer
+    on the outcome, and show every tool call that the audit log has.
+    """
+    record = run.record
+    if record is None:
+        return ["no Decision Record was saved"]
+    problems = []
+    if not record.summary.strip():
+        problems.append("the summary is empty")
+    if not record.evidence:
+        problems.append("the evidence is empty")
+    if record.outcome != run.outcome:
+        problems.append(f"the record has outcome {record.outcome}, the answer {run.outcome}")
+    in_evidence = Counter(i["tool"] for i in record.evidence if i["type"] == "tool_result")
+    audited = Counter(run.tools_called)
+    problems += [
+        f"{tool} was called, but the evidence does not show it"
+        for tool in sorted(audited - in_evidence)
+    ]
+    problems += [
+        f"the evidence shows {tool}, but the audit log does not"
+        for tool in sorted(in_evidence - audited)
+    ]
+    return problems
+
+
 def _check(name: str, problems: list[str]) -> Check:
     return Check(name=name, passed=not problems, detail="; ".join(problems))
 
 
 def check_run(scenario: Scenario, run: Run) -> list[Check]:
     """Compare the run with the expectation. A check is added only when the scenario asks
-    for it, except `outcome` and `proposed_actions`, which every run is checked on.
+    for it, except `outcome`, `proposed_actions`, the citations and the Decision Record,
+    which every run is checked on.
     """
     expected = scenario.expected
     answer = run.answer.lower()
+    cited = parse_citations(run.answer)
 
     outcome = (
         []
@@ -337,7 +420,16 @@ def check_run(scenario: Scenario, run: Run) -> list[Check]:
     checks = [
         _check("outcome", outcome),
         _check("proposed_actions", [f"proposed {t}, which is not allowed" for t in unexpected]),
+        _check(CITATIONS_CHECK, _citation_problems(run)),
+        _check("decision_record", _record_problems(run)),
     ]
+    if expected.must_cite:
+        checks.append(
+            _check(
+                "must_cite",
+                [f"the answer does not cite {c}" for c in expected.must_cite if c not in cited],
+            )
+        )
     if expected.must_call:
         checks.append(
             _check(

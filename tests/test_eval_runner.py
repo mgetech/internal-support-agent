@@ -25,25 +25,43 @@ from support_agent.api import app, get_graph
 from support_agent.decision_record import DecisionRecord
 from support_agent.graph import build_graph
 
+CHUNK = "vacation-policy#entitlement#0"
 
-def _record() -> DecisionRecord:
-    return DecisionRecord(
-        request_id="req-1",
-        employee_id="emp_001",
-        channel="rest",
-        outcome="resolve",
-        summary="Resolved using get_leave_balance.",
-        evidence=[],
-        citations=[],
-        policy_version=None,
-        prompt_versions={},
-        verifier=[],
-        model_calls=[],
-        total_tokens=0,
-        total_cost_eur=0.0,
-        latency_ms=1,
-        trace_id=None,
-    )
+
+def _evidence(tools: list[str], retrieved: list[str]) -> list[dict]:
+    """One `tool_result` item per tool. A search returns the `retrieved` chunks."""
+    return [
+        {
+            "type": "tool_result",
+            "tool": tool,
+            "summary": "done",
+            "ref": [{"id": c, "policy_version": "2026-09.1"} for c in retrieved]
+            if tool == "search_policies"
+            else None,
+        }
+        for tool in tools
+    ]
+
+
+def _record(**overrides: object) -> DecisionRecord:
+    fields = {
+        "request_id": "req-1",
+        "employee_id": "emp_001",
+        "channel": "rest",
+        "outcome": "resolve",
+        "summary": "Resolved using get_leave_balance.",
+        "evidence": _evidence(["get_leave_balance"], []),
+        "citations": [],
+        "policy_version": None,
+        "prompt_versions": {},
+        "verifier": [],
+        "model_calls": [],
+        "total_tokens": 0,
+        "total_cost_eur": 0.0,
+        "latency_ms": 1,
+        "trace_id": None,
+    }
+    return DecisionRecord(**{**fields, **overrides})
 
 
 def _scenario(feedback: dict | None = None, **expected: object) -> Scenario:
@@ -58,16 +76,21 @@ def _scenario(feedback: dict | None = None, **expected: object) -> Scenario:
     )
 
 
-def _run(**overrides: object) -> Run:
+def _run(retrieved: list[str] | None = None, **overrides: object) -> Run:
+    """A run whose record shows the same tools as the audit log, unless a test says
+    otherwise. `retrieved` is what a search in the run returned.
+    """
     fields = {
         "request_id": "req-1",
         "answer": "You have 18 days left.",
         "outcome": "resolve",
-        "record": _record(),
         "tools_called": ["get_leave_balance"],
         "proposed_actions": [],
         **overrides,
     }
+    if "record" not in fields:
+        evidence = _evidence(fields["tools_called"], retrieved or [])
+        fields["record"] = _record(outcome=fields["outcome"], evidence=evidence)
     return Run(**fields)
 
 
@@ -90,6 +113,8 @@ def test_a_run_that_matches_the_expectation_passes_every_check():
     assert [c.name for c in checks] == [
         "outcome",
         "proposed_actions",
+        "citations_in_retrieval_set",
+        "decision_record",
         "must_call",
         "must_not_call",
         "answer_must_contain",
@@ -97,8 +122,13 @@ def test_a_run_that_matches_the_expectation_passes_every_check():
     assert all(c.passed for c in checks)
 
 
-def test_only_outcome_and_proposed_actions_are_checked_when_the_scenario_asks_for_no_more():
-    assert [c.name for c in check_run(_scenario(), _run())] == ["outcome", "proposed_actions"]
+def test_a_scenario_that_asks_for_no_more_gets_the_checks_every_run_gets():
+    assert [c.name for c in check_run(_scenario(), _run())] == [
+        "outcome",
+        "proposed_actions",
+        "citations_in_retrieval_set",
+        "decision_record",
+    ]
 
 
 def test_a_wrong_outcome_fails():
@@ -108,7 +138,9 @@ def test_a_wrong_outcome_fails():
 
 
 def test_a_missing_required_tool_fails():
-    failed = _failed(_scenario(must_call=["get_leave_balance"]), _run(tools_called=[]))
+    failed = _failed(
+        _scenario(must_call=["get_leave_balance"]), _run(tools_called=["search_policies"])
+    )
 
     assert failed == {"must_call": "get_leave_balance was not called"}
 
@@ -151,6 +183,87 @@ def test_answer_text_is_compared_without_regard_to_case():
     assert failed == {
         "answer_must_contain": "the answer lacks 'AWAITS'",
         "answer_must_not_contain": "the answer has 'SECRET'",
+    }
+
+
+# --- citations ---
+
+
+def test_a_citation_from_this_requests_search_passes():
+    run = _run(
+        retrieved=[CHUNK],
+        tools_called=["search_policies"],
+        answer=f"Ten days is too many [chunk:{CHUNK}].",
+        record=_record(evidence=_evidence(["search_policies"], [CHUNK]), citations=[CHUNK]),
+    )
+
+    assert _failed(_scenario(must_cite=[CHUNK]), run) == {}
+
+
+def test_a_citation_the_request_did_not_retrieve_fails():
+    run = _run(answer=f"Ten days is too many [chunk:{CHUNK}].")
+
+    problem = f"the answer cites {CHUNK}, which the request did not retrieve"
+    assert _failed(_scenario(), run) == {"citations_in_retrieval_set": problem}
+
+
+def test_a_record_citation_the_request_did_not_retrieve_fails():
+    run = _run(record=_record(citations=[CHUNK]))
+
+    problem = f"the record cites {CHUNK}, which the request did not retrieve"
+    assert _failed(_scenario(), run) == {"citations_in_retrieval_set": problem}
+
+
+def test_an_answer_that_lacks_a_required_citation_fails():
+    scenario = _scenario(must_cite=[CHUNK])
+
+    assert _failed(scenario, _run()) == {"must_cite": f"the answer does not cite {CHUNK}"}
+
+
+# --- the Decision Record ---
+
+
+def test_a_missing_record_fails():
+    failed = _failed(_scenario(), _run(record=None))
+
+    assert failed == {"decision_record": "no Decision Record was saved"}
+
+
+def test_a_record_with_a_blank_summary_or_no_evidence_fails():
+    run = _run(record=_record(summary="  ", evidence=[]), tools_called=[])
+
+    assert _failed(_scenario(), run) == {
+        "decision_record": "the summary is empty; the evidence is empty"
+    }
+
+
+def test_a_record_that_disagrees_with_the_answer_on_the_outcome_fails():
+    run = _run(record=_record(outcome="escalate"))
+
+    assert _failed(_scenario(), run) == {
+        "decision_record": "the record has outcome escalate, the answer resolve"
+    }
+
+
+def test_a_tool_call_the_evidence_does_not_show_fails():
+    run = _run(tools_called=["get_leave_balance", "search_policies"], record=_record())
+
+    assert _failed(_scenario(), run) == {
+        "decision_record": "search_policies was called, but the evidence does not show it"
+    }
+
+
+def test_the_same_tool_called_twice_needs_two_evidence_items():
+    run = _run(tools_called=["get_leave_balance", "get_leave_balance"], record=_record())
+
+    assert "get_leave_balance was called" in _failed(_scenario(), run)["decision_record"]
+
+
+def test_evidence_of_a_tool_the_audit_log_does_not_have_fails():
+    run = _run(tools_called=[], record=_record())
+
+    assert _failed(_scenario(), run) == {
+        "decision_record": "the evidence shows get_leave_balance, but the audit log does not"
     }
 
 
@@ -241,6 +354,25 @@ def test_s001_fails_when_the_agent_searches_the_policies(api):
 
     assert run.tools_called == ["search_policies", "get_leave_balance"]
     assert _failed(scenario, run) == {"must_not_call": "search_policies was called"}
+
+
+def test_s003_refuses_with_a_citation_and_a_complete_record(api, search_embeds_like):
+    search_embeds_like(CHUNK)
+    arguments = json.dumps({"reason": "You have 3.5 days left.", "citations": [CHUNK]})
+    _script(
+        api,
+        CLASSIFIED,
+        call_reply("c1", "search_policies", '{"query": "vacation entitlement"}'),
+        call_reply("c2", "get_leave_balance", "{}"),
+        call_reply("c3", "decline_request", arguments),
+    )
+    scenario = load_scenarios()["S003"]
+
+    run = run_scenario(api, scenario)
+
+    assert run.tools_called == ["search_policies", "get_leave_balance", "decline_request"]
+    assert run.record.citations == [CHUNK]
+    assert _failed(scenario, run) == {}
 
 
 def test_a_proposal_is_read_back_from_the_callers_actions(api):
