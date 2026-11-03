@@ -9,16 +9,16 @@ import json
 from datetime import date
 
 import pytest
-from data.generate import GENERATED_AS_OF
 from tests.tool_args import sample_args
 
-from support_agent import audit
+from support_agent import audit, util
 from support_agent.request_context import bind_request_context
 from support_agent.tools import (
     TOOLS,
     Tool,
     base,
     create_ticket,
+    decline_request,
     get_known_outages,
     get_leave_balance,
     search_policies,
@@ -143,7 +143,7 @@ def test_a_range_over_a_weekend_does_not_count_it(seeded_db):
 
 def test_a_request_can_start_today(seeded_db):
     # the fixed test date is Tuesday 2026-09-22
-    result = _as("emp_001", submit_leave_request, GENERATED_AS_OF, GENERATED_AS_OF)
+    result = _as("emp_001", submit_leave_request, util.get_today(), util.get_today())
 
     assert result["proposed"] is True
     assert result["working_days"] == 1
@@ -284,6 +284,25 @@ def test_search_returns_ids_that_exist(seeded_db, search_embeds_like):
     assert set(ids) <= known
 
 
+def test_search_evidence_has_the_id_and_policy_version_of_each_chunk(seeded_db, search_embeds_like):
+    search_embeds_like("vacation-policy#entitlement#0")
+    with bind_request_context("emp_001", "req-search", "rest") as ctx:
+        search_policies("vacation days and the VPN")
+
+    chunks = ctx.evidence[0]["ref"]
+    stored = dict(seeded_db.execute("SELECT id, policy_version FROM policy_chunks").fetchall())
+    assert [chunk["id"] for chunk in chunks][0] == "vacation-policy#entitlement#0"
+    assert all(set(chunk) == {"id", "policy_version"} for chunk in chunks)
+    assert {chunk["id"]: chunk["policy_version"] for chunk in chunks} == {
+        chunk["id"]: stored[chunk["id"]] for chunk in chunks
+    }
+    # the evidence names the build of the index that was searched
+    index_build_id = seeded_db.execute("SELECT index_build_id FROM seed_meta").fetchone()[0]
+    assert ctx.evidence[0]["index_build_id"] == index_build_id
+    # chunks of two policies with different versions
+    assert {chunk["policy_version"] for chunk in chunks} == {"2026-09.1", "2026-11.1"}
+
+
 def test_search_finds_chunks_by_their_words(seeded_db, search_embeds_like):
     # the vector points at an IT chunk, so only the word search can find the carryover one
     search_embeds_like("it-access-policy#vpn-access#0")
@@ -306,3 +325,31 @@ def test_every_tool_call_is_audited_and_recorded(fn: Tool, seeded_db, search_emb
     assert [(e["type"], e["tool"]) for e in ctx.evidence] == [("tool_result", fn.__name__)]
     # the evidence and the audit event have the same time, and it is not negative
     assert ctx.evidence[0]["latency_ms"] == rows[0][2] >= 0
+
+
+def test_leave_balance_year_defaults_to_the_current_year(seeded_db, monkeypatch):
+    # the seed has the year of the test date (2026) and the year after
+    assert _as("emp_001", get_leave_balance)["year"] == 2026
+
+    monkeypatch.setattr(util, "get_today", lambda: date(2027, 1, 4))
+    assert _as("emp_001", get_leave_balance)["year"] == 2027
+    assert _as("emp_001", get_leave_balance)["remaining_days"] == 18.0
+
+    monkeypatch.setattr(util, "get_today", lambda: date(2025, 3, 1))
+    assert "error" in _as("emp_001", get_leave_balance)
+
+
+def test_decline_request_with_a_blank_reason_does_not_decline(seeded_db):
+    result = _as("emp_001", decline_request, "  ", [])
+
+    assert result == {"declined": False, "error": "the reason is empty"}
+
+
+def test_decline_request_changes_no_data(seeded_db):
+    before = {t: _count(seeded_db, t) for t in ("pending_actions", "leave_requests", "tickets")}
+
+    result = _as("emp_001", decline_request, "No.", ["vacation-policy#entitlement#0"])
+
+    assert result == {"declined": True}
+    after = {t: _count(seeded_db, t) for t in before}
+    assert after == before

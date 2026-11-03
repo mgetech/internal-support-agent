@@ -2,20 +2,35 @@
 generator must be deterministic — no wall-clock or RNG dependence.
 """
 
-from datetime import date
+from datetime import date, timedelta
+from types import SimpleNamespace
 
 import pytest
+from data import generate
 from data.generate import (
+    calculate_index_build_id,
     embed_policy_chunks,
     generate_employees,
     generate_known_outages,
     generate_leave_balances,
     generate_policy_chunks,
+    get_seed_as_of,
     load_seed_data,
     read_policies,
     render_seed_sql,
     write_seed_sql,
 )
+
+from support_agent.tools.policy_search import get_index_build_id
+
+
+@pytest.fixture(autouse=True)
+def isolated_embedding_cache(tmp_path, monkeypatch):
+    """No test here may write fake vectors into the real cache in .embeddings-cache, or
+    need the settings to name the model.
+    """
+    monkeypatch.setattr(generate, "CACHE_DIR", tmp_path / "embedding-cache")
+    monkeypatch.setattr(generate, "get_embedding_model", lambda: "fake")
 
 
 def _balance(employee_id: str) -> dict:
@@ -52,7 +67,8 @@ def test_emp_003_part_time_prorated_to_fifteen_days():
     assert _balance("emp_003")["entitlement_days"] == 15
 
 
-def test_emp_006_hired_2026_07_accrues_pro_rata():
+def test_emp_006_accrues_pro_rata_on_the_test_date():
+    # the test date is 2026-09-22, 83 days after the hire date
     employees = {e["id"]: e for e in generate_employees()}
 
     assert employees["emp_006"]["hired_at"] == date(2026, 7, 1)
@@ -86,10 +102,93 @@ def test_one_active_vpn_outage_and_one_resolved_sso_incident():
     assert sso["status"] == "resolved"
 
 
-def test_generation_is_deterministic():
-    assert generate_employees() == generate_employees()
-    assert generate_leave_balances() == generate_leave_balances()
-    assert generate_known_outages() == generate_known_outages()
+def test_generation_is_the_same_for_the_same_date():
+    as_of = date(2027, 5, 17)
+
+    assert generate_employees(as_of) == generate_employees(as_of)
+    assert generate_leave_balances(as_of) == generate_leave_balances(as_of)
+    assert generate_known_outages(as_of) == generate_known_outages(as_of)
+
+
+def test_generation_follows_the_clock_when_no_date_is_given():
+    # the tests fixture sets util.get_today to 2026-09-22
+    assert generate_known_outages() == generate_known_outages(date(2026, 9, 22))
+
+
+# --- the data is current on any date ---
+
+# early, middle and late in one year, and a year other than the default one
+YEAR_2027 = [date(2027, 1, 2), date(2027, 6, 30), date(2027, 12, 28)]
+
+
+def _balance_at(employee_id: str, as_of: date, year: int | None = None) -> dict:
+    year = year or as_of.year
+    return next(
+        b
+        for b in generate_leave_balances(as_of)
+        if b["employee_id"] == employee_id and b["year"] == year
+    )
+
+
+@pytest.mark.parametrize("as_of", YEAR_2027)
+def test_the_planted_balances_are_the_same_on_any_date(as_of):
+    assert _remaining(_balance_at("emp_001", as_of)) == 18
+    assert _balance_at("emp_001", as_of)["entitlement_days"] == 30
+    assert _remaining(_balance_at("emp_004", as_of)) == 3.5
+    assert _remaining(_balance_at("emp_012", as_of)) == 0
+    assert _balance_at("emp_003", as_of)["entitlement_days"] == 15
+
+
+@pytest.mark.parametrize("as_of", YEAR_2027)
+def test_balances_are_written_for_this_year_and_the_next(as_of):
+    balances = generate_leave_balances(as_of)
+
+    assert {b["year"] for b in balances} == {as_of.year, as_of.year + 1}
+    assert len(balances) == 24
+    for employee_id in ("emp_001", "emp_004", "emp_006"):
+        this_year = _balance_at(employee_id, as_of)
+        next_year = _balance_at(employee_id, as_of, as_of.year + 1)
+        assert {**this_year, "year": 0} == {**next_year, "year": 0}
+
+
+@pytest.mark.parametrize("as_of", YEAR_2027)
+def test_emp_006_is_in_their_first_calendar_year(as_of):
+    employee = next(e for e in generate_employees(as_of) if e["id"] == "emp_006")
+    hired_at = employee["hired_at"]
+
+    assert hired_at.year == as_of.year
+    assert hired_at <= as_of
+    # entitlement accrues 2.5 days for each completed month and is never negative
+    months = (as_of.year - hired_at.year) * 12 + as_of.month - hired_at.month
+    months -= as_of.day < hired_at.day
+    assert _balance_at("emp_006", as_of)["entitlement_days"] == months * 2.5
+
+
+@pytest.mark.parametrize("as_of", YEAR_2027)
+def test_the_vpn_outage_is_active_and_the_sso_outage_is_resolved(as_of):
+    outages = {o["system"]: o for o in generate_known_outages(as_of)}
+
+    assert outages["vpn"]["status"] != "resolved"
+    assert outages["vpn"]["started_at"].date() == as_of - timedelta(days=2)
+    assert outages["sso"]["status"] == "resolved"
+    assert outages["sso"]["started_at"].date() == as_of - timedelta(days=12)
+
+
+def test_the_same_date_gives_byte_identical_seed_sql():
+    assert render_seed_sql(date(2027, 6, 30)) == render_seed_sql(date(2027, 6, 30))
+
+
+def test_another_date_gives_another_seed_sql():
+    assert render_seed_sql(date(2027, 6, 30)) != render_seed_sql(date(2028, 6, 30))
+
+
+def test_the_seed_sql_records_its_date():
+    sql = render_seed_sql(date(2027, 6, 30))
+
+    index_build_id = calculate_index_build_id(generate_policy_chunks(), "fake")
+    values = f"('2027-06-30', '{index_build_id}')"
+
+    assert f"INSERT INTO seed_meta (as_of, index_build_id) VALUES\n    {values};" in sql
 
 
 def test_five_policies_with_expected_ids_and_domains():
@@ -106,25 +205,37 @@ def test_five_policies_with_expected_ids_and_domains():
     assert policies["vacation-policy"].domain == "hr"
 
 
-def test_every_policy_carries_the_policy_version_in_frontmatter():
-    for policy in read_policies().values():
-        assert policy.policy_version == "2026-09.1"
+# a policy file gets a new version when its text changes
+POLICY_VERSIONS = {
+    "vacation-policy": "2026-09.1",
+    "sick-leave-policy": "2026-09.1",
+    "parental-leave-policy": "2026-09.1",
+    "expense-policy": "2026-09.1",
+    "it-access-policy": "2026-11.1",
+}
+
+
+def test_every_policy_carries_its_policy_version_in_frontmatter():
+    policies = read_policies()
+
+    assert {id: policy.policy_version for id, policy in policies.items()} == POLICY_VERSIONS
 
 
 def test_every_policy_chunk_row_carries_the_version_of_its_policy_file():
-    versions = {policy.policy_version for policy in read_policies().values()}
-
     rows = generate_policy_chunks()
 
-    assert versions == {"2026-09.1"}
-    assert {row["policy_version"] for row in rows} == versions
+    assert {row["policy"]: row["policy_version"] for row in rows} == POLICY_VERSIONS
 
 
 def test_the_seed_sql_writes_the_policy_version_of_every_chunk():
     sql = render_seed_sql()
 
-    # one quoted version in each of the 16 chunk rows
-    assert sql.count("'2026-09.1'") == len(generate_policy_chunks())
+    # one quoted version in each chunk row: the 5 chunks of the IT access policy have the
+    # new version and the other 12 have the old one
+    chunks = generate_policy_chunks()
+    new_version = [row for row in chunks if row["policy_version"] == "2026-11.1"]
+    assert sql.count("'2026-11.1'") == len(new_version) == 5
+    assert sql.count("'2026-09.1'") == len(chunks) - len(new_version)
 
 
 def test_vacation_policy_has_the_entitlement_heading():
@@ -151,7 +262,7 @@ def test_read_policies_rejects_a_file_missing_frontmatter(tmp_path):
 
 
 def test_generate_policy_chunks_covers_the_whole_corpus():
-    assert len(generate_policy_chunks()) == 16
+    assert len(generate_policy_chunks()) == 17
 
 
 def test_generate_policy_chunks_is_stable_across_regeneration():
@@ -196,9 +307,111 @@ def test_embed_policy_chunks_caches_and_skips_already_embedded_content(tmp_path)
     assert (tmp_path / "fake.json").exists()
 
 
-def test_render_seed_sql_contains_all_four_tables():
+def test_an_edited_chunk_with_the_same_id_is_embedded_again(tmp_path):
+    chunk = {"id": "vacation-policy#entitlement#0", "content": "30 days a year"}
+    other = {"id": "vacation-policy#carryover#0", "content": "5 days carry over"}
+    calls = []
+
+    def counting_embed(texts):
+        calls.append(list(texts))
+        return [[float(len(t))] for t in texts]
+
+    def embed(rows):
+        return embed_policy_chunks(rows, embed_fn=counting_embed, model="m", cache_dir=tmp_path)
+
+    first = embed([chunk, other])
+    again = embed([chunk, other])
+    edited = embed([{**chunk, "content": "28 days a year, or more"}, other])
+
+    assert calls == [["30 days a year", "5 days carry over"], ["28 days a year, or more"]]
+    assert again == first
+    # same id, new text: a new vector. The unchanged chunk comes from the cache.
+    assert edited[chunk["id"]] != first[chunk["id"]]
+    assert edited[other["id"]] == first[other["id"]]
+
+
+def test_the_cache_is_not_shared_between_embedding_models(tmp_path):
+    rows = [{"id": "vacation-policy#carryover#0", "content": "5 days carry over"}]
+    calls = []
+
+    def counting_embed(texts):
+        calls.append(list(texts))
+        return [[0.0] for _ in texts]
+
+    embed_policy_chunks(rows, embed_fn=counting_embed, model="model-a", cache_dir=tmp_path)
+    embed_policy_chunks(rows, embed_fn=counting_embed, model="model-b", cache_dir=tmp_path)
+    embed_policy_chunks(rows, embed_fn=counting_embed, model="model-a", cache_dir=tmp_path)
+
+    # model-b is embedded on its own, and model-a is still cached
+    assert len(calls) == 2
+    assert {path.name for path in tmp_path.iterdir()} == {"model-a.json", "model-b.json"}
+
+
+def test_the_cache_is_keyed_on_the_embedding_deployment_from_the_settings(monkeypatch, tmp_path):
+    monkeypatch.undo()
+    rows = [{"id": "vacation-policy#carryover#0", "content": "5 days carry over"}]
+    settings = SimpleNamespace(azure_openai_deployment_embedding="my-embedding-deployment")
+    monkeypatch.setattr(generate, "get_settings", lambda: settings)
+
+    embed_policy_chunks(rows, embed_fn=lambda texts: [[0.0] for _ in texts], cache_dir=tmp_path)
+
+    assert [path.name for path in tmp_path.iterdir()] == ["my-embedding-deployment.json"]
+
+
+# --- the index build id ---
+
+
+def test_the_index_build_id_is_a_short_hash():
+    index_build_id = calculate_index_build_id(generate_policy_chunks(), "model-a")
+
+    assert len(index_build_id) == 12
+    int(index_build_id, 16)
+
+
+def test_the_same_inputs_give_the_same_index_build_id():
+    rows = generate_policy_chunks()
+
+    assert calculate_index_build_id(rows, "model-a") == calculate_index_build_id(rows, "model-a")
+    # the order of the chunks does not matter
+    assert calculate_index_build_id(rows, "model-a") == calculate_index_build_id(
+        list(reversed(rows)), "model-a"
+    )
+
+
+def test_changing_the_version_of_one_policy_changes_the_index_build_id():
+    rows = generate_policy_chunks()
+    changed = [
+        {**row, "policy_version": "2026-12.1"} if row["policy"] == "expense-policy" else row
+        for row in rows
+    ]
+
+    assert calculate_index_build_id(changed, "model-a") != calculate_index_build_id(rows, "model-a")
+
+
+def test_changing_the_chunker_changes_the_index_build_id():
+    rows = generate_policy_chunks()
+    changed = [{**row, "chunker": "fixed"} for row in rows]
+
+    assert calculate_index_build_id(changed, "model-a") != calculate_index_build_id(rows, "model-a")
+
+
+def test_changing_the_embedding_model_changes_the_index_build_id():
+    rows = generate_policy_chunks()
+
+    assert calculate_index_build_id(rows, "model-b") != calculate_index_build_id(rows, "model-a")
+
+
+def test_the_seed_sql_changes_with_the_embedding_model(monkeypatch):
+    first = render_seed_sql(date(2027, 6, 30))
+    monkeypatch.setattr(generate, "get_embedding_model", lambda: "another-model")
+
+    assert render_seed_sql(date(2027, 6, 30)) != first
+
+
+def test_render_seed_sql_contains_every_seeded_table():
     sql = render_seed_sql()
 
+    assert "INSERT INTO seed_meta" in sql
     assert "INSERT INTO employees" in sql
     assert "INSERT INTO leave_balances" in sql
     assert "INSERT INTO known_outages" in sql
@@ -218,14 +431,14 @@ def test_render_seed_sql_escapes_single_quotes():
 
 
 def test_render_seed_sql_is_deterministic():
-    assert render_seed_sql() == render_seed_sql()
+    assert render_seed_sql(date(2026, 9, 22)) == render_seed_sql(date(2026, 9, 22))
 
 
 def test_write_seed_sql_matches_render(tmp_path):
     output = tmp_path / "seed.sql"
-    write_seed_sql(output)
+    write_seed_sql(output, date(2026, 9, 22))
 
-    assert output.read_text(encoding="utf-8") == render_seed_sql()
+    assert output.read_text(encoding="utf-8") == render_seed_sql(date(2026, 9, 22))
 
 
 def _fake_embed(texts):
@@ -238,11 +451,17 @@ def test_load_seed_data_populates_every_seeded_table(clean_db):
 
     assert clean_db.execute("SELECT count(*) FROM employees").fetchone()[0] == 12
     assert clean_db.execute("SELECT count(*) FROM known_outages").fetchone()[0] == 2
-    assert clean_db.execute("SELECT count(*) FROM policy_chunks").fetchone()[0] == 16
+    assert clean_db.execute("SELECT count(*) FROM policy_chunks").fetchone()[0] == 17
     missing = clean_db.execute(
         "SELECT count(*) FROM policy_chunks WHERE embedding IS NULL"
     ).fetchone()[0]
     assert missing == 0
+
+
+def test_load_seed_data_writes_its_vectors_to_the_cache_it_is_given(clean_db, tmp_path):
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db)
+
+    assert (tmp_path / "embedding-cache" / "fake.json").exists()
 
 
 def test_load_seed_data_is_safe_to_run_twice(clean_db):
@@ -250,4 +469,31 @@ def test_load_seed_data_is_safe_to_run_twice(clean_db):
     load_seed_data(embed_fn=_fake_embed, conn=clean_db)
 
     assert clean_db.execute("SELECT count(*) FROM employees").fetchone()[0] == 12
-    assert clean_db.execute("SELECT count(*) FROM policy_chunks").fetchone()[0] == 16
+    assert clean_db.execute("SELECT count(*) FROM policy_chunks").fetchone()[0] == 17
+
+
+def test_reseeding_the_same_inputs_keeps_the_index_build_id(clean_db):
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db)
+    first = get_index_build_id()
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db, as_of=date(2027, 6, 30))
+
+    assert first == calculate_index_build_id(generate_policy_chunks(), "fake")
+    # another seed date does not change how the index was built
+    assert get_index_build_id() == first
+
+
+def test_reseeding_with_another_embedding_model_changes_the_index_build_id(clean_db, monkeypatch):
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db)
+    first = get_index_build_id()
+    monkeypatch.setattr(generate, "get_embedding_model", lambda: "another-model")
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db)
+
+    assert get_index_build_id() != first
+
+
+def test_the_seed_date_can_be_read_back_from_the_database(clean_db):
+    assert get_seed_as_of() is None
+
+    load_seed_data(embed_fn=_fake_embed, conn=clean_db, as_of=date(2027, 6, 30))
+
+    assert get_seed_as_of() == date(2027, 6, 30)

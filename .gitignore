@@ -9,6 +9,9 @@
 .embeddings-cache/
 data/seed.sql
 
+# the table of the last eval run
+eval/results/
+
 # Python
 __pycache__/
 *.py[cod]

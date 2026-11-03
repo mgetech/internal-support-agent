@@ -31,7 +31,7 @@ ESCALATION_REASONS = {
     "model_unavailable": "no model answered",
     "invalid_tool_arguments": "the model sent tool arguments that were not valid JSON",
     "tool_limit_reached": "the tool limit was reached",
-    "citation_check_failed": "the answer cited a source this request did not retrieve",
+    "citation_check_failed": "the answer's citations failed the check",
 }
 
 
@@ -88,6 +88,12 @@ def summarize(
     if outcome == "propose_action":
         ids = ", ".join(str(action_id) for action_id in proposed_action_ids)
         return f"Proposed for approval (pending action {ids}); nothing was changed yet."
+
+    if outcome == "refuse_with_citation":
+        return (
+            "Refused because the request goes against policy or permissions, "
+            f"citing {', '.join(citations)}."
+        )
 
     tools = []
     for item in evidence:

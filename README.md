@@ -55,11 +55,12 @@ partners, a "Why this answer?" view, a "My requests" tab, an approval queue tab,
 run against a live model: the tests use a scripted one. What exists today:
 
 - **Synthetic data.** Employees, leave balances, outages and policies, from one
-  deterministic generator. The policies in `data/policies` are fictional, written for
+  generator. The output is identical for the same as-of date, which is today unless given,
+  so the stack runs in any year. The policies in `data/policies` are fictional, written for
   testing, and are not legal advice.
 - **Identity from the session.** Tools read the employee from the request. The model
   never gives an employee id, and no tool accepts one.
-- **Typed tools.** Five tools. Read tools query the employee's own records. The model
+- **Typed tools.** Six tools. Read tools query the employee's own records. The model
   never writes SQL.
 - **Proposals, not writes.** Write tools add to an approval queue and change nothing.
 - **Role-checked approval.** Only an `hr_partner` or a `manager` can decide, never on their
@@ -73,6 +74,9 @@ run against a live model: the tests use a scripted one. What exists today:
   model classifies first, so a request that is out of scope ends before the agent and its
   tools run.
 - **Citation check.** Every cited chunk must come from this request's search.
+- **Refusal with citation.** The agent ends a request that goes against a policy or the
+  employee's permissions with `decline_request`. The refusal must cite a section from this
+  request's search, or it is retried once and then escalated.
 - **Decision Records.** One saved record per request: outcome, reason, evidence, versions
   and cost.
 - **Model client.** Responses API, retry, fallback model and a cost in euros per call.
@@ -116,12 +120,12 @@ Rough build order:
 | CI | GitHub Actions — ruff + pytest always; eval gate when model secrets are configured | Partial — lint and tests |
 | Packaging | Docker + docker-compose (db, api, ui) | Partial — db only |
 | Orchestration | **LangGraph** | Partial — graph built, served by `POST /chat` and tested with a scripted model |
-| Model inference | **Azure OpenAI via AI Foundry** — a capable deployment for the agent loop, a small one for classification and claim extraction, `text-embedding-3-small` (1536-dim) | Partial — embeddings, and a model client with retry, fallback and cost; the graph uses the client, but only scripted replies are tested, with no live model run |
+| Model inference | **Azure OpenAI via AI Foundry** — a capable deployment for the agent loop, a small one for classification and claim extraction, `text-embedding-3-small` (1536-dim) | Partial — embeddings, and a model client with retry, fallback and cost; the graph uses the client; tests use scripted replies, and the six eval scenarios have also run against a live model |
 | API | FastAPI | Partial — see [REST API](#rest-api); login is a header stub |
 | Retrieval | Metadata pre-filtering → hybrid pgvector cosine + Postgres full-text ranking (`ts_rank_cd`), reciprocal-rank fusion (k=60), top-5 | Partial — hybrid search in place; metadata pre-filtering planned |
 | Chunking | Pluggable `Chunker` interface; structural (heading-aware) default, chosen by ablation against fixed-size, recursive and semantic | Partial — structural chunker only |
 | MCP | Official Python MCP SDK (FastMCP) exposing the tool belt; stdio + streamable HTTP | Planned |
-| Eval tooling | Own deterministic harness (gates, trajectory, retrieval) + **RAGAS** for answer quality | Planned |
+| Eval tooling | Own deterministic harness (gates, trajectory, retrieval) + **RAGAS** for answer quality | Partial — six scenarios and a deterministic runner (`make eval`, one run each); gate, n=3 and RAGAS planned. See [docs/evaluation.md](docs/evaluation.md) |
 | Observability | **Langfuse** (cloud keys via `.env`; self-hostable for residency) | Planned |
 | UI | Streamlit — chat, approval queue, decision records, cost | Partial — chat, my requests, approval queue and decision records tabs (`make ui`); the cost tab is planned |
 

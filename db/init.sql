@@ -4,6 +4,13 @@
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- how the seed data was built (one row, written by data/generate.py): the date it is
+-- generated as of, and the id of the policy index build
+CREATE TABLE seed_meta (
+    as_of DATE NOT NULL,
+    index_build_id TEXT NOT NULL
+);
+
 CREATE TABLE employees (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

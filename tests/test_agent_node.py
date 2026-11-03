@@ -36,6 +36,7 @@ def test_the_agent_sends_the_system_prompt_and_the_tool_belt():
         "search_policies",
         "get_leave_balance",
         "create_ticket",
+        "decline_request",
     ]
     assert all(tool["type"] == "function" and tool["strict"] is False for tool in call["tools"])
 

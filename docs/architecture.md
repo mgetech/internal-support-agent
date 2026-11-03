@@ -12,6 +12,8 @@ flowchart LR
     C -- tool calls --> T["3. tools"]
     T -- results --> C
     T -.-> K[("Policy retrieval - RAG")] & H[("Records and outages")]
+    T -- decline_request --> R["3b. decline"]
+    R --> V
     C -- draft answer --> V["4. verify citations"]
     V -- bad citation: retry once --> C
     V -- passes --> F["5. finalize"]
@@ -23,6 +25,7 @@ flowchart LR
      T:::Peach
      K:::Aqua
      H:::Aqua
+     R:::Peach
      V:::Peach
      F:::Pine
      D:::Aqua
@@ -45,7 +48,7 @@ A request ends in `escalate` at these points:
 | classify | the request is outside HR and IT, or the classification failed |
 | agent | no model answered, or the model sent tool arguments that were not valid JSON |
 | agent | the next tool calls would go over the tool limit |
-| verify | the answer cited a chunk this request did not retrieve, a second time |
+| verify | the answer cited a chunk this request did not retrieve, or a refusal had no citation, a second time |
 
 The `refuse` node then writes the answer in the language of the request.
 
@@ -56,7 +59,7 @@ Every request ends in exactly one outcome:
 | `resolve` | the answer passed the citation check and no action was proposed |
 | `propose_action` | the answer passed the check and the request proposed at least one action |
 | `escalate` | a person has to take over: out of scope, a model failure, the tool limit, or a failed check |
-| `refuse_with_citation` | part of the outcome list, but nothing sets it yet |
+| `refuse_with_citation` | the request goes against a policy or the employee's permissions, and the refusal cites the policy section it rests on |
 
 The rule is to escalate instead of guessing. Whenever the agent cannot continue safely,
 it hands the request to a person.
@@ -64,9 +67,33 @@ it hands the request to a person.
 ## Data
 
 All data is synthetic and comes from one deterministic generator (`data/generate.py`):
-12 employees with leave balances, two IT outages and five HR and IT policies. The same
-run always gives the same data. Some edge cases are planted on purpose, such as an
-employee with no days left.
+12 employees with leave balances, two IT outages and five HR and IT policies. Some edge
+cases are planted on purpose, such as an employee with no days left.
+
+**The seed follows its date.** The generator takes an `as_of` date, which is today unless
+given (`make seed` always uses today). The same `as_of` date gives byte-identical output.
+There is no date setting, and the stack runs in any year:
+
+- Leave balances are written for the year of `as_of` and the year after, with the same
+  numbers in both. Anna Keller (`emp_001`) always has 18 days left and Paul Brandt
+  (`emp_004`) 3.5.
+- Elif Yildiz (`emp_006`) is hired 83 days before `as_of`, but never before January 1, so
+  she is in her first calendar year on any date. Her entitlement is 2.5 days for each
+  completed month, which is 0 in the first month of the year.
+- The open VPN outage started 2 days before `as_of` and the resolved SSO outage 12 days
+  before.
+- The date is saved in the one-row table `seed_meta`, so a reader can tell which date a
+  database was seeded for (`get_seed_as_of()` in `data/generate.py`).
+
+**The index build id.** `seed_meta` also holds `index_build_id`: a 12-character hash of the
+sorted list of `policy@version`, the chunker name and the embedding model. The same inputs
+give the same id, so seeding again changes nothing, and a new policy version, chunker or
+embedding model gives a new id. `get_index_build_id()` in `policy_search.py` reads it. The
+evidence item of every search carries it, so a result can be traced to the index it came
+from. The seed date is not part of the id.
+
+All code gets today's date from `util.get_today()`, which tests replace with a fixed date.
+`get_leave_balance` uses its year when the model gives none.
 
 A heading-aware chunker splits each policy into sections. A chunk id has the form
 `<policy>#<heading-slug>#<n>`, for example `vacation-policy#entitlement#0`. Citations and
@@ -100,6 +127,7 @@ still fails it.
 | `search_policies` | policy sections, found by meaning and by keywords |
 | `submit_leave_request` | proposes a leave request |
 | `create_ticket` | proposes an IT ticket |
+| `decline_request` | ends the request with a refusal: a reason and the chunk ids it rests on. It reads and changes no data |
 
 The queries are typed and use parameters. The model never writes SQL.
 
@@ -118,7 +146,8 @@ not taken out.
 
 **Search.** `search_policies` joins two rankings with reciprocal rank fusion: vector
 similarity (pgvector, cosine) and Postgres full-text search. It returns the top five
-sections.
+sections. The evidence item of each search lists the returned chunks, each as its id and
+the version of its policy, and the id of the index build that was searched.
 
 There is no re-ranking stage after the fusion: the corpus is small, the top five is
 already a tenth of it, and the agent reads all five sections.
@@ -244,6 +273,7 @@ tool calls used, the outcome and the evidence.
 | `classify` | one call to the small model with a strict JSON schema: family (`hr`, `it`, `other`), risk (`read`, `write`, `out_of_scope`) and language (`en`, `de`) |
 | `agent` | one model call with the tools. The reply may ask for tool calls |
 | `tools` | runs the requested calls with LangGraph's `ToolNode`, adds the chunk ids of each search to the citation whitelist, and counts the calls |
+| `decline` | turns an accepted `decline_request` call into the final answer (the reason, then the citations as `[chunk:<id>]`) and sets the outcome `refuse_with_citation` |
 | `tool_limit_reached` | ends the request when the limit is reached |
 | `verify` | the deterministic citation check on the draft answer |
 | `refuse` | writes the answer for every escalation, in the language of the request |
@@ -288,6 +318,11 @@ Every `[chunk:<id>]` in the draft answer must be a chunk that this request retri
 check is plain code, and no model judges it.
 
 - If the answer passes, the request ends in `resolve` or `propose_action`.
+- A refusal must also cite at least one chunk. The agent ends a request as a refusal by
+  calling `decline_request` with a reason and chunk ids. The `decline` node writes them as
+  the answer and the same check runs on it, with the extra rule. If it passes, the outcome
+  is `refuse_with_citation`. If it fails, the retry and the escalation work as below. The
+  tool does not check the citations itself, so the check is in one place.
 - If it fails for the first time, the objection is saved in the state. The agent runs
   again and sees the objection as a system message. This is a loop in the graph, because
   no error happened and the second try needs a different input.
@@ -327,8 +362,11 @@ request id or the filters and the number of rows. A read has no request of its o
 the event gets a new request id.
 
 **Policy version.** Each policy section is stored with the version from its policy file's
-frontmatter. A record names the version that the database holds, not the version of the
-files on disk. If sections of several versions are stored, the record names all of them.
+frontmatter, and a policy file gets a new version when its text changes. A record names
+every policy with its version, sorted by policy name, for example
+`expense-policy@2026-09.1; it-access-policy@2026-11.1; ...`. It names the versions that
+the database holds, not the versions of the files on disk. If one policy has sections of
+several versions, it is listed once for each.
 
 ## Orphan check
 
@@ -427,6 +465,18 @@ Version 1.2.0 stops the agent from inventing advice and from repeating the hando
   request. The banner in the UI already gives the general reminder, so version 1.1.0's
   line at the end of every answer is gone.
 
+Version 1.3.0 adds the refusal:
+
+- The agent refuses only with `decline_request`, after it searched the policies, and
+  cites the sections the refusal rests on. It refuses when a request goes against a policy
+  or the employee's permissions, for example a request for a colleague's records. It does
+  not refuse when no policy applies.
+- Before it sends a leave request, it checks the balance and does not send a request for
+  more days than are left. It refuses instead.
+- The cases that need a person (part-time proration, parental-leave eligibility, security
+  incidents, sick leave beyond six weeks) are never refused. The agent says that they need
+  a person.
+
 The agent is not told today's date, so a date without a year can make it ask for the year.
 
 ## Tests
@@ -452,7 +502,10 @@ The agent is not told today's date, so a date without a year can make it ask for
 
 - A policy claim that has no citation at all passes the check. Claim extraction is planned.
 - The trace id is always empty until tracing is built.
-- `refuse_with_citation` is never set.
+- A refusal that fails the check can be followed by a plain answer on the retry. Then the
+  request ends in `resolve`, not in `refuse_with_citation`, because only a call of
+  `decline_request` sets that outcome.
+- Nothing checks that the cited section supports the refusal, only that it was retrieved.
 - If saving the record fails in `finalize`, the request fails.
 - The policy version is read once at `finalize`. Re-seeding at that moment could make the
   record name the new version.

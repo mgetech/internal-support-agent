@@ -39,13 +39,16 @@ def parse_citations(text: str) -> list[str]:
     return citations
 
 
-def verify_citations(draft: str, retrieved_chunk_ids: list[str]) -> Verdict:
+def verify_citations(
+    draft: str, retrieved_chunk_ids: list[str], require_citation: bool = False
+) -> Verdict:
     """Check that every citation in `draft` is in `retrieved_chunk_ids`. A draft with no
-    citations passes this check. Whether a policy claim needs a citation is a different
-    check.
+    citations passes this check, unless `require_citation` is true, which is the case for
+    a refusal. Whether a policy claim needs a citation is a different check.
     """
     citations = parse_citations(draft)
     unknown = [chunk_id for chunk_id in citations if chunk_id not in retrieved_chunk_ids]
+    missing = require_citation and not citations
     objection = None
     if unknown:
         cited = ", ".join(f"[chunk:{chunk_id}]" for chunk_id in unknown)
@@ -54,9 +57,15 @@ def verify_citations(draft: str, retrieved_chunk_ids: list[str]) -> Verdict:
             "conversation. Cite only ids from a search result. Remove the claim, or "
             "search again."
         )
+    elif missing:
+        objection = (
+            "Your refusal has no citation. A refusal must cite the policy section it rests "
+            "on. Search the policies if you have not, then call decline_request again with "
+            "at least one chunk id from a search result. If no policy applies, do not refuse."
+        )
     return Verdict(
         check=CITATIONS_CHECK,
-        passed=not unknown,
+        passed=not unknown and not missing,
         citations=citations,
         unknown_citations=unknown,
         objection=objection,

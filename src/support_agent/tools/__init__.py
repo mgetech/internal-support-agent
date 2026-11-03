@@ -9,6 +9,7 @@ Identity is never part of it: tools read it from the bound request context.
 from __future__ import annotations
 
 from support_agent.tools.base import Tool, gated_write, is_gated_write
+from support_agent.tools.decline import decline_request
 from support_agent.tools.hr_it import (
     create_ticket,
     get_known_outages,
@@ -23,6 +24,7 @@ TOOLS: list[Tool] = [
     search_policies,
     submit_leave_request,
     create_ticket,
+    decline_request,
 ]
 
 __all__ = ["TOOLS", "Tool", "gated_write", "is_gated_write"]

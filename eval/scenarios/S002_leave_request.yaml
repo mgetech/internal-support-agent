@@ -1,0 +1,15 @@
+id: S002
+title: Valid leave request
+persona: emp_001
+request: "Please book me off from {monday_in_3_weeks} to {friday_in_3_weeks}."
+expected:
+  outcome: propose_action
+  must_cite: []
+  must_call: ["submit_leave_request"]
+  must_not_call: ["create_ticket"]
+  answer_must_contain: ["approval"]
+  proposed_actions: ["submit_leave_request"]
+notes: >
+  Monday to Friday of one week, three weeks ahead: five working days against 18 remaining,
+  and under the ten days that need two weeks' notice. The agent proposes the request and
+  says that it waits for approval. Nothing is booked.

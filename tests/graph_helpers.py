@@ -84,7 +84,9 @@ def make_tools(tool_calls):
     def search_policies(query: str) -> str:
         """Search the policies."""
         tool_calls.append(("search_policies", {"query": query}))
-        _add_tool_result("search_policies", "1 chunks found", [CHUNK])
+        _add_tool_result(
+            "search_policies", "1 chunks found", [{"id": CHUNK, "policy_version": "2026-09.1"}]
+        )
         return json.dumps({"results": [{"chunk_id": CHUNK}]})
 
     def get_leave_balance(year: int = 2026) -> str:
@@ -101,7 +103,15 @@ def make_tools(tool_calls):
         _add_tool_result("create_ticket", "proposed a ticket", f"pending_actions:{action_id}")
         return json.dumps({"proposed": True, "action_id": action_id})
 
-    return [search_policies, get_leave_balance, create_ticket]
+    def decline_request(reason: str, citations: list[str]) -> str:
+        """Decline the request."""
+        tool_calls.append(("decline_request", {"reason": reason, "citations": citations}))
+        _add_tool_result("decline_request", "declined", None)
+        if not reason.strip():
+            return json.dumps({"declined": False, "error": "the reason is empty"})
+        return json.dumps({"declined": True})
+
+    return [search_policies, get_leave_balance, create_ticket, decline_request]
 
 
 def run_graph(llm, text="hi", saved_records=None, **graph_options):

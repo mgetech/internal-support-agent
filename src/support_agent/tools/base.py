@@ -15,7 +15,7 @@ from support_agent import audit
 from support_agent.request_context import get_request_context
 
 Tool = Callable[..., str]
-Ref = str | list[str] | None
+Ref = str | list[dict[str, str]] | None
 
 
 def gated_write(fn: Tool) -> Tool:
@@ -35,19 +35,30 @@ def record_tool_call(
     ref: Ref,
     started_at: float,
     conn: psycopg.Cursor | None = None,
+    details: dict[str, Any] | None = None,
 ) -> None:
     """Write a `tool_call` audit event and add an evidence item to the request. Both
     have `latency_ms`, the time since `started_at`.
 
     summary: one short sentence about the result, e.g. "18.0 of 30.0 days left in 2026".
-    ref: where the result came from, e.g. a pending action id or the returned chunk ids.
+    ref: where the result came from, e.g. a pending action id, or the returned chunks as
+    id and policy version.
     started_at: the `time.perf_counter()` value that the tool took when it started.
     conn: pass the tool's cursor to save the audit event in the tool's own transaction.
+    details: more fields for the audit payload and the evidence item, for example the
+    `index_build_id` of a search.
     """
     latency_ms = round((time.perf_counter() - started_at) * 1000)
     audit.record(
         "tool_call",
-        {"tool": tool, "args": args, "summary": summary, "ref": ref, "latency_ms": latency_ms},
+        {
+            "tool": tool,
+            "args": args,
+            "summary": summary,
+            "ref": ref,
+            "latency_ms": latency_ms,
+            **(details or {}),
+        },
         conn=conn,
     )
     get_request_context().evidence.append(
@@ -57,5 +68,6 @@ def record_tool_call(
             "summary": summary,
             "ref": ref,
             "latency_ms": latency_ms,
+            **(details or {}),
         }
     )

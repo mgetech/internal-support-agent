@@ -14,10 +14,12 @@ from support_agent.llm import LLMClient
 from support_agent.nodes import (
     agent_node,
     classify_node,
+    decline_node,
     finalize_node,
     refuse_node,
     route_after_agent,
     route_after_classify,
+    route_after_tools,
     route_after_verify,
     tool_limit_node,
     tools_node,
@@ -39,8 +41,9 @@ def build_graph(
     classifier_effort: str = "",
     agent_effort: str = "",
 ) -> CompiledStateGraph:
-    """classify -> agent <-> tools -> verify -> finalize. Out-of-scope requests, failures,
-    a reached tool limit (`max_tool_calls`) and a failed check go through refuse. Every
+    """classify -> agent <-> tools -> verify -> finalize. A refusal goes from tools through
+    decline to verify. Out-of-scope requests, failures, a reached tool limit
+    (`max_tool_calls`) and a failed check go through refuse. Every
     path ends in finalize, which saves the Decision Record with `save_record`. The record
     names the policy version that `get_policy_version` returns. The efforts are the
     reasoning efforts of the classify and agent calls; empty means the model's default.
@@ -50,6 +53,7 @@ def build_graph(
     graph.add_node("refuse", refuse_node)
     graph.add_node("agent", agent_node(llm, agent_model, tools, agent_effort))
     graph.add_node("tools", tools_node(tools))
+    graph.add_node("decline", decline_node)
     graph.add_node("tool_limit_reached", partial(tool_limit_node, max_tool_calls=max_tool_calls))
     graph.add_node("verify", verify_node)
     graph.add_node(
@@ -72,7 +76,8 @@ def build_graph(
     graph.add_conditional_edges(
         "verify", route_after_verify, {"agent": "agent", "end": "finalize", "refuse": "refuse"}
     )
-    graph.add_edge("tools", "agent")
+    graph.add_conditional_edges("tools", route_after_tools, ["agent", "decline"])
+    graph.add_edge("decline", "verify")
     graph.add_edge("tool_limit_reached", "refuse")
     graph.add_edge("refuse", "finalize")
     graph.add_edge("finalize", END)
