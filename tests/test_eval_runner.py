@@ -352,7 +352,8 @@ def test_s001_passes_through_the_api(api):
     assert [c.name for c in check_run(scenario, run) if not c.passed] == []
 
 
-def test_s001_fails_when_the_agent_searches_the_policies(api):
+def test_s001_fails_when_the_agent_searches_the_policies(api, search_embeds_like):
+    search_embeds_like(CHUNK)
     _script(
         api,
         CLASSIFIED,

@@ -56,7 +56,10 @@ def test_an_unknown_reasoning_effort_is_refused(monkeypatch):
         Settings(_env_file=None, **REQUIRED)
 
 
-def test_missing_required_field_raises():
+def test_missing_required_field_raises(monkeypatch):
+    for key in REQUIRED:
+        monkeypatch.delenv(key.upper(), raising=False)
+
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
 

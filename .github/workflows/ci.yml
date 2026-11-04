@@ -23,6 +23,13 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgresql://support_agent:support_agent@localhost:5432/support_agent
+      # The settings need these to load, but no test calls a model. The endpoint cannot
+      # be reached, so a test that tried would fail.
+      AZURE_OPENAI_ENDPOINT: https://models.invalid/openai/v1
+      AZURE_OPENAI_API_KEY: not-a-real-key
+      AZURE_OPENAI_DEPLOYMENT_AGENT: test-agent
+      AZURE_OPENAI_DEPLOYMENT_CLASSIFIER: test-classifier
+      AZURE_OPENAI_DEPLOYMENT_EMBEDDING: test-embedding
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
