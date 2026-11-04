@@ -51,8 +51,8 @@ instead of an answer. Every path ends in `finalize`.
 ## Status
 
 **Work in progress.** The agent and its REST API are built. The UI has a chat tab with numbered policy sources under each answer and, for HR
-partners, a "Why this answer?" view, a "My requests" tab, an approval queue tab, a decision records tab and thumbs feedback, and the agent has not
-run against a live model: the tests use a scripted one. What exists today:
+partners, a "Why this answer?" view, a "My requests" tab, an approval queue tab, a decision records tab and thumbs feedback. The agent runs against a live model in the compose
+stack, but the automated tests use a scripted one. What exists today:
 
 - **Synthetic data.** Employees, leave balances and outages come from one generator. The
   output is identical for the same as-of date, which is today unless given, so the stack
@@ -84,8 +84,12 @@ run against a live model: the tests use a scripted one. What exists today:
 - **Audit log.** Every tool call, proposal, approval, execution, feedback and model call,
   with the request id and the actor.
 - **Versioned prompts.** A prompt change without a version bump fails a test.
+- **Docker Compose.** One command starts the database, the API and the UI. The seed data
+  is loaded once, on the first start.
 - **Tests.** Unit, component and database integration tests, with no model keys needed.
-  The security tests run for every tool.
+  The security tests run for every tool. CI runs them against Postgres and also fails when
+  a policy text changes without a new `policy_version`, or when a chunk id or chunk text
+  changes without an updated snapshot.
 
 The details and the reasons are in [docs/architecture.md](docs/architecture.md). The Stack
 table below shows which parts are built and which are planned.
@@ -118,8 +122,8 @@ Rough build order:
 | Language | Python 3.12 | In place |
 | DB | PostgreSQL 16 + **pgvector** | In place |
 | Tests | pytest, incl. DB-backed tests against the compose/CI Postgres | In place |
-| CI | GitHub Actions — ruff + pytest always; eval gate when model secrets are configured | Partial — lint and tests |
-| Packaging | Docker + docker-compose (db, api, ui) | Partial — db only |
+| CI | GitHub Actions — ruff + pytest always; eval gate when model secrets are configured | Partial — lint, and tests against Postgres with the policy checks; the eval gate is planned |
+| Packaging | Docker + docker-compose (db, api, ui) | In place — a one-time seed step runs before the API |
 | Orchestration | **LangGraph** | Partial — graph built, served by `POST /chat` and tested with a scripted model |
 | Model inference | **Azure OpenAI via AI Foundry** — a capable deployment for the agent loop, a small one for classification and claim extraction, `text-embedding-3-small` (1536-dim) | Partial — embeddings, and a model client with retry, fallback and cost; the graph uses the client; tests use scripted replies, and the six eval scenarios have also run against a live model |
 | API | FastAPI | Partial — see [REST API](#rest-api); login is a header stub |
@@ -148,6 +152,34 @@ Rough build order:
 The employee comes from the `X-Employee-Id` header, which is a login stub for now. No
 model-visible tool accepts an employee identifier; the caller's identity comes only from the
 authenticated request.
+
+
+## Quickstart
+
+You need Docker and an Azure AI Foundry resource. Deploy the models that `.env.example`
+names in that resource: an LLM for the agent (`gpt-5.1`), a smaller LLM for classification
+(`gpt-5.1-mini`) and an embedding model (`text-embedding-3-small`). To use other models,
+change the deployment names in `.env`.
+
+```
+cp .env.example .env     # then fill in the Azure values
+docker compose up
+```
+
+Open the UI at http://localhost:8501. The API is at http://localhost:8000.
+
+On the first start, Compose creates the database with the schema, loads the seed data once
+and then starts the API and the UI. The seed step sends the policy text to the embedding
+deployment, so the Azure values must be right. Later starts skip the seed and keep your
+data. If a port is already in use, set `DB_PORT`, `API_PORT` or `UI_PORT` in `.env`.
+
+`db/init.sql` runs only on a new database. After a change to the schema, run
+`make reset-db`. It deletes the database volume, starts a new database and seeds it. Run
+`make setup` once before it.
+
+To work on the code, run `make setup`, `make db-up` and `make seed`. Then `make test` and
+`make lint` work. The tests need no model keys.
+
 
 ## License
 

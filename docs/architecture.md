@@ -505,6 +505,50 @@ The agent is not told today's date, so a date without a year can make it ask for
   route takes an employee id, except through the header and the allowed `GET /decisions`
   filter.
 
+## Design decisions
+
+**LangGraph, not a managed agent service.** The approval gate, the citation check, the
+tool limit and the order of the steps are the main part of this project. We want to write
+them as code and test them. We also run the tools ourselves, so the rule "no tool takes an
+employee id" is easy to enforce. The cost is that we write the retry, the state and the
+tool limit ourselves.
+
+**MCP: the employee is set when the session starts (planned).** The MCP server is not
+built yet. When it is, the employee will be set once when the session starts, like the
+header in REST, and never given as a tool argument. An id in a tool argument lets the
+model ask for another employee's data. For stdio, the cost is one server process for each
+employee, which is fine for a demo.
+
+**One agent.** There is one set of tools and one domain, HR and IT. More agents add delay,
+cost and more ways to fail, and they add no new ability here. The `classify` step is a
+fixed place where a second agent could be added if a different domain came.
+
+**Streamlit for the UI.** The UI is a place to review answers, decide on actions and read
+records. All the rules are in the REST API, and the UI calls only the API. So the UI can be
+replaced without touching the rules.
+
+**A small model for classification.** `classify` only picks a label, so a small model with
+little thinking is enough, and it is cheaper than the model that runs the agent loop. We
+have not measured the saving yet.
+
+**Escalation recall over resolution rate.** The two kinds of mistake cost different
+amounts. A wrong answer about leave or a security incident can hurt someone. An escalation
+that was not needed costs a person a few minutes. So when the agent is not sure, it
+escalates: at the tool limit, when no model answers, and when the citation check fails
+twice. The goal is that cases which should escalate do escalate (recall), even if fewer
+requests end in `resolve`. The eval gate that measures this is planned.
+
+**pgvector, not a separate vector database.** One database holds the records, the
+policies, the vectors and the full-text index. The hybrid search is one SQL query. A
+separate vector database would be a second system to run. It would only help with a corpus
+far larger than this one.
+
+**Our own Decision Records, not the trace.** A Decision Record is a row in Postgres. It
+has what an HR partner needs to see why the agent did what it did, and the API controls who
+can read it. A trace is good for debugging, but it can be sampled or removed, and it is
+outside our access rules. Tracing is planned, and the record has a field for
+the trace id, which is empty until then.
+
 ## Known limits
 
 - A policy claim that has no citation at all passes the check. Claim extraction is planned.
