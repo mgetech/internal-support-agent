@@ -54,10 +54,11 @@ instead of an answer. Every path ends in `finalize`.
 partners, a "Why this answer?" view, a "My requests" tab, an approval queue tab, a decision records tab and thumbs feedback, and the agent has not
 run against a live model: the tests use a scripted one. What exists today:
 
-- **Synthetic data.** Employees, leave balances, outages and policies, from one
-  generator. The output is identical for the same as-of date, which is today unless given,
-  so the stack runs in any year. The policies in `data/policies` are fictional, written for
-  testing, and are not legal advice.
+- **Synthetic data.** Employees, leave balances and outages come from one generator. The
+  output is identical for the same as-of date, which is today unless given, so the stack
+  runs in any year. The policies in `data/policies` are written by hand, are fictional and
+  are not legal advice. CI fails if a policy text changes without a new `policy_version`,
+  or if a chunk id or chunk text changes without an updated snapshot.
 - **Identity from the session.** Tools read the employee from the request. The model
   never gives an employee id, and no tool accepts one.
 - **Typed tools.** Six tools. Read tools query the employee's own records. The model

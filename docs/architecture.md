@@ -66,9 +66,16 @@ it hands the request to a person.
 
 ## Data
 
-All data is synthetic and comes from one deterministic generator (`data/generate.py`):
-12 employees with leave balances, two IT outages and five HR and IT policies. Some edge
-cases are planted on purpose, such as an employee with no days left.
+All data is synthetic. A deterministic generator (`data/generate.py`) makes 12 employees
+with leave balances and two IT outages. Some edge cases are planted on purpose, such as an
+employee with no days left. The five HR and IT policies in `data/policies` are written by
+hand and committed. The generator reads them and cuts them into chunks for the seed.
+
+**Checks on the policies.** `data/policies/checksums.json` holds the version and a hash of
+the text of each policy. A test fails if the text changed and `policy_version` did not.
+`data/policies/chunk_snapshot.json` holds every chunk id with a hash of its text, so a
+changed id or chunk text fails a test until the snapshot is updated on purpose. After an
+edit, bump `policy_version`, run `python -m data.snapshot` and review the diff.
 
 **The seed follows its date.** The generator takes an `as_of` date, which is today unless
 given (`make seed` always uses today). The same `as_of` date gives byte-identical output.

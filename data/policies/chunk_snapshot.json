@@ -1,0 +1,19 @@
+{
+  "expense-policy#late-submissions#0": "6a62f32b992901006debbe2300762740c22c71ae978ee4675a03f90c20cd6b8d",
+  "expense-policy#receipts-and-submission#0": "92531b0d69e23d2a0ba05628fae0b6574afe2c8c4e72193ba32713ae443ec722",
+  "it-access-policy#password-self-service#0": "82acebcfe946184f65ff980c42c627eafdb049416e02a73e2f04ca096ed2f294",
+  "it-access-policy#privacy-of-records#0": "988b8e39d94298cce43f6b555db2bca4588311cfff31c251a1dffb037ff17bde",
+  "it-access-policy#security-incidents#0": "163320d17f2f4e8121469f25d2080e67b58b6a9759ac224751012871ec0bc986",
+  "it-access-policy#software-licenses#0": "d8ca4226274d3bcf7c7c80ee37aa3a625c8d352e252bb58c04438d38eb916ee7",
+  "it-access-policy#vpn-access#0": "6d4aa5059539e5c19c1f255ad92df08a760f73781bf329a59e1b5d972cb9c99e",
+  "parental-leave-policy#eligibility-and-benefit-interactions#0": "ff54d097dc5b5feff9d1e3eb8118384e9b5b7c3fd26f491682f1c59b0c024b52",
+  "parental-leave-policy#entitlement-and-notice#0": "daf58638ff55e8a7bc16f56b901e92c70820be7748a2368c0bfeee167070fd04",
+  "parental-leave-policy#part-time-during-leave#0": "30cea70af46c704c26cfa29a3215766b0af096821729d479ca3ed0b454ef36cb",
+  "sick-leave-policy#notification-and-certification#0": "a05c11e959cd474daa92e2d62d2a120ec4a997b1a545a5620c45e6973f8e3053",
+  "sick-leave-policy#pay-continuation#0": "f504af76e9dd37ac5cbdcf50c40d6894e58f4f4bedc0608dfcf713c1ce58dd31",
+  "sick-leave-policy#sickness-during-vacation#0": "3781bd4cd028ef66665dfe2e22d6bc06accd13f7a6597d1b947fe03ecb8704ad",
+  "vacation-policy#booking-and-approval#0": "6d4c78ab3571d2125c73290cd73cbfc01350ca2cdd7880d685867a5b59e3a2d3",
+  "vacation-policy#carryover#0": "2436e3f1b912a5b2aaadd877c79f5c17e18f23bcba21ef3ec9c4001379731199",
+  "vacation-policy#entitlement#0": "2e331c44221f5aa78b758732f1cb20d100f4e709e39f1bf88bce81939f015ca2",
+  "vacation-policy#part-time-and-mid-year-changes#0": "60e75186905ba49a579b0a84c456c121997a89a177c01602ebfe81eaa3d0e3e6"
+}
