@@ -94,6 +94,24 @@ stack, but the automated tests use a scripted one. What exists today:
 The details and the reasons are in [docs/architecture.md](docs/architecture.md). The Stack
 table below shows which parts are built and which are planned.
 
+## Failure modes
+
+What the system does when something goes wrong, and what proves it. A row is here only when
+the behavior and its test exist.
+
+| Failure | What the system does | Proven by |
+|---|---|---|
+| Model API error | The client retries the same model up to two more times. If that fails, it tries the fallback model, when one is set. If every model fails, the request ends in `escalate`. The tries are listed in the Decision Record. | `src/support_agent/llm.py`, `tests/test_llm_fallback.py`, `tests/test_agent_node.py` |
+| The agent reaches the tool limit | The calls that would go over the limit (8 by default) are not run. The request ends in `escalate`. | `tests/test_tools_node.py`, `tests/test_decision_record.py` |
+| An answer cites a section the search did not return, or a refusal has no citation | The agent runs once more and sees the objection. If it fails again, the request ends in `escalate`. | `src/support_agent/guardrails/verifier.py`, `tests/test_verifier.py`, `tests/test_decline_request.py` |
+| The same write is requested twice | The action that is still waiting is returned. No second action is added. | `tests/test_tools_db.py` |
+| The process crashes after a proposal | The action stays pending and has no Decision Record. The orphan check flags it in the audit log. Nothing runs that check automatically yet. | `src/support_agent/reconciliation.py`, `tests/test_reconciliation.py` |
+| Wrong role, or approval of your own request | The decision is refused (HTTP 403) before the action is locked. Nothing changes. | `tests/test_approval.py`, `tests/test_api.py` |
+| A request for a colleague's data | No tool takes an employee id, so there is no way to ask for it. The agent refuses and cites the privacy policy. | `tests/test_tool_contracts.py`, `tests/test_api.py`, scenario S005 in [docs/evaluation.md](docs/evaluation.md) |
+
+The gaps that are known today are listed in
+[docs/architecture.md](docs/architecture.md#known-limits).
+
 ## Roadmap
 
 Rough build order:
