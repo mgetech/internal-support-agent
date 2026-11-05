@@ -14,7 +14,7 @@ import calendar
 import re
 from collections import Counter
 from collections.abc import Iterator
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Self
 
@@ -35,8 +35,10 @@ from support_agent.tools import TOOLS, is_gated_write
 from support_agent.tools.policy_search import get_index_build_id, get_policy_version
 
 SCENARIOS_DIR = Path(__file__).resolve().parent / "scenarios"
-# the table of the last run, overwritten each time. It is not committed.
-RESULTS_FILE = Path(__file__).resolve().parent / "results" / "latest.md"
+# Every run writes its table here, in a file named after the time of the run. This folder
+# is not committed. `eval/publish.py` copies one run to RESULTS_DIR, which is committed.
+RUNS_DIR = Path(__file__).resolve().parent / ".runs"
+RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 # The employee who reads the Decision Records. Only an HR partner can.
 RECORD_READER = "emp_005"
@@ -588,11 +590,24 @@ def format_results(header: Header, results: list[Result]) -> str:
             f"| {'yes' if r.passed else 'no'} | {r.total_tokens} | {r.total_cost_eur:.4f} "
             f"| {r.latency_ms} | {', '.join(r.failed_checks) or '-'} |"
         )
+    lines += ["", format_summary(results), ""]
+    return "\n".join(lines)
+
+
+def format_summary(results: list[Result]) -> str:
+    """One line: how many scenarios passed, and the total tokens and cost."""
     passed = sum(r.passed for r in results)
     tokens = sum(r.total_tokens for r in results)
     cost = sum(r.total_cost_eur for r in results)
-    lines += ["", f"{passed} of {len(results)} passed. Tokens {tokens}, EUR {cost:.4f}.", ""]
-    return "\n".join(lines)
+    return f"{passed} of {len(results)} passed. Tokens {tokens}, EUR {cost:.4f}."
+
+
+def get_run_path(now: datetime | None = None) -> Path:
+    """The file for a run that starts at `now` (UTC), for example `20261105T091500Z.md`.
+    The name sorts by time, and it can be given to `make eval-publish`.
+    """
+    now = now or datetime.now(UTC)
+    return RUNS_DIR / f"{now:%Y%m%dT%H%M%SZ}.md"
 
 
 def get_client(api_url: str) -> httpx.Client:
@@ -602,12 +617,14 @@ def get_client(api_url: str) -> httpx.Client:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the scenarios against the API, print one result per scenario and write the
-    results table to a file. Returns 1 if any scenario failed.
+    results table to a new file in eval/.runs/. Returns 1 if any scenario failed.
     """
     parser = argparse.ArgumentParser(description="Run the scenarios against a running API.")
     parser.add_argument("scenario_ids", nargs="*", help="run only these, for example S001")
     parser.add_argument("--api-url", default="http://localhost:8000")
-    parser.add_argument("--output", type=Path, default=RESULTS_FILE, help="the results file")
+    parser.add_argument(
+        "--output", type=Path, help="the results file, by default a new file in eval/.runs/"
+    )
     args = parser.parse_args(argv)
 
     scenarios = load_scenarios()
@@ -632,12 +649,11 @@ def main(argv: list[str] | None = None) -> int:
                 if not check.passed:
                     print(f"  - {check.name}: {check.detail}")
 
-    table = format_results(get_header(results), results)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(table, encoding="utf-8")
-    passed = sum(r.passed for r in results)
-    print(f"{passed} of {len(results)} passed. Results are in {args.output}")
-    return 0 if passed == len(results) else 1
+    output = args.output or get_run_path()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(format_results(get_header(results), results), encoding="utf-8")
+    print(f"{format_summary(results)} Results are in {output}")
+    return 0 if all(r.passed for r in results) else 1
 
 
 if __name__ == "__main__":
