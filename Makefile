@@ -1,4 +1,4 @@
-.PHONY: setup lint format test db-up reset-db seed ui eval
+.PHONY: setup lint format test db-up reset-db seed ui eval eval-publish
 
 VENV := .venv
 ifeq ($(OS),Windows_NT)
@@ -39,7 +39,13 @@ seed:
 ui:
 	$(PYTHON) -m streamlit run ui/app.py
 
-# run every scenario against the API at http://localhost:8000 and write eval/results/latest.md.
-# Start the API first. Pass other options with ARGS, for example: make eval ARGS="S001"
+# run every scenario against the API at http://localhost:8000 and write the table to a new
+# file in eval/.runs/. Start the API first. Pass other options with ARGS, for example:
+# make eval ARGS="S001"
 eval:
 	$(PYTHON) -m eval.run_eval $(ARGS)
+
+# copy one run to eval/results/ so it can be committed, for example:
+# make eval-publish NAME=20261105T091500Z
+eval-publish:
+	$(PYTHON) -m eval.publish $(NAME)

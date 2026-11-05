@@ -10,7 +10,7 @@ safety or escalation. Those checks are plain comparisons.
 |---|---|
 | Scenario files and schema (`eval/scenarios/`) | In place, six scenarios |
 | Deterministic runner (`make eval`) | In place, one run per scenario |
-| Results table with the seed, index and version header | In place |
+| Results table with the seed, index and version header, and `make eval-publish` | In place |
 | Runs per scenario (n=3) and the pass-rate report | Planned |
 | Gate on the metrics below, in CI | Planned |
 | Action safety asserted in the database | Planned |
@@ -31,8 +31,21 @@ make eval                                   # or: make eval ARGS="S001 S003"
 
 It needs the model keys in `.env`, because the scenarios call the real model. It also reads
 the database directly for the audit log, so `DATABASE_URL` must point to the database the
-API uses. The table is written to `eval/results/latest.md`, which is not committed. The
-command exits with 1 if any scenario fails.
+API uses. The command prints one line for each scenario and a total, and it exits with 1 if
+any scenario fails.
+
+Each run writes its table to a new file in `eval/.runs/`, named after the time of the run,
+for example `20261105T091500Z.md`. That folder is not committed. The first lines of the
+file record the seed date, the index build id, the policy versions and the prompt versions
+that the run used.
+
+To keep a run, copy it to `eval/results/`, which is committed:
+
+```
+make eval-publish NAME=20261105T091500Z
+```
+
+The file keeps its name. The command does not overwrite a result that is published already.
 
 ## What a run checks
 
@@ -130,28 +143,12 @@ S004 and S005 use data from the seed: the open VPN outage, and emp_004 with 3.5 
 
 ## Latest run
 
-One run of each scenario against a live model, after the six scenarios and all runner
+The latest published run is [20261103T123636Z](../eval/results/20261103T123636Z.md). It is
+one run of each scenario against a live model, after the six scenarios and all runner
 checks were in place.
 
-- Seed as of: 2026-11-03
-- Index build id: f5834ff01856
-- Policy versions: expense-policy@2026-09.1; it-access-policy@2026-11.1;
-  parental-leave-policy@2026-09.1; sick-leave-policy@2026-09.1; vacation-policy@2026-09.1
-- Prompt versions: classifier 1.0.0, agent_system 1.3.0
-- Runs per scenario: 1
-
-| Scenario | Expected outcome | Actual outcome | Pass | Tokens | EUR | Latency ms |
-|---|---|---|---|---|---|---|
-| S001 | resolve | resolve | yes | 3964 | 0.0056 | 10031 |
-| S002 | propose_action | propose_action | yes | 7760 | 0.0153 | 17801 |
-| S003 | refuse_with_citation | refuse_with_citation | yes | 5618 | 0.0156 | 25569 |
-| S004 | resolve | resolve | yes | 4913 | 0.0100 | 11936 |
-| S005 | refuse_with_citation | refuse_with_citation | yes | 4578 | 0.0077 | 8127 |
-| S006 | resolve | resolve | yes | 3939 | 0.0054 | 7646 |
-
-6 of 6 passed. Tokens 30772, EUR 0.0595.
-
-Two tables are comparable only when the header lines match.
+All published runs are in [eval/results](../eval/results). Two tables are comparable only
+when their header lines match.
 
 ## Known limits
 

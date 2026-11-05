@@ -1,0 +1,22 @@
+{
+  "expense-policy": {
+    "version": "2026-09.1",
+    "sha256": "7e4e981d8694425f119aa4b388db1b71a577417a04a515bfad7869e2b8d8cdf9"
+  },
+  "it-access-policy": {
+    "version": "2026-11.1",
+    "sha256": "fe353daa3a442e7d02bff59d00d08cd0cd42af09bba78d7839c3e2b6a204eb5a"
+  },
+  "parental-leave-policy": {
+    "version": "2026-09.1",
+    "sha256": "3a15c5968ce7b448ab64ad089ca3225df05a1668b4ccab3d9936fbf7e94efb84"
+  },
+  "sick-leave-policy": {
+    "version": "2026-09.1",
+    "sha256": "dca22af1d6eafb421ae3a8920be81daa6f1e195d28a9a10239bb764faa1b8775"
+  },
+  "vacation-policy": {
+    "version": "2026-09.1",
+    "sha256": "fbe9160edc084115ff2309135fbe42de0e0bee80b330c2ba6859f9db541f06ff"
+  }
+}

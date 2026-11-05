@@ -6,7 +6,8 @@ the real tools on the seeded database.
 from __future__ import annotations
 
 import json
-from datetime import date
+import re
+from datetime import UTC, date, datetime
 
 import pytest
 from data.generate import calculate_index_build_id, generate_policy_chunks
@@ -19,10 +20,12 @@ from eval.run_eval import (
     Scenario,
     check_run,
     format_results,
+    format_summary,
     get_error_result,
     get_header,
     get_identity_parameters,
     get_result,
+    get_run_path,
     load_scenarios,
     main,
     run_scenario,
@@ -352,7 +355,8 @@ def test_s001_passes_through_the_api(api):
     assert [c.name for c in check_run(scenario, run) if not c.passed] == []
 
 
-def test_s001_fails_when_the_agent_searches_the_policies(api):
+def test_s001_fails_when_the_agent_searches_the_policies(api, search_embeds_like):
+    search_embeds_like(CHUNK)
     _script(
         api,
         CLASSIFIED,
@@ -473,6 +477,18 @@ def test_the_table_has_a_header_a_row_per_scenario_and_a_total():
     assert "1 of 2 passed. Tokens 2000, EUR 0.0223." in table
 
 
+def test_the_summary_is_one_line_with_the_totals():
+    results = [_result(), _result(scenario_id="S003", passed=False, total_tokens=800)]
+
+    assert format_summary(results) == "1 of 2 passed. Tokens 2000, EUR 0.0246."
+
+
+def test_a_run_file_is_named_after_the_time_of_the_run():
+    path = get_run_path(datetime(2026, 11, 5, 9, 15, 0, tzinfo=UTC))
+
+    assert path == run_eval.RUNS_DIR / "20261105T091500Z.md"
+
+
 def test_the_table_says_unknown_for_a_header_value_it_does_not_have():
     header = _header(seed_as_of=None, index_build_id=None, policy_version=None, prompt_versions={})
 
@@ -551,6 +567,20 @@ def test_main_writes_the_table_and_returns_zero_when_every_scenario_passes(
     assert "| S001 Leave balance query | resolve | resolve | yes |" in table
     assert f"- Seed as of: {TEST_TODAY}" in table
     assert "1 of 1 passed" in capsys.readouterr().out
+
+
+def test_main_writes_a_new_file_in_the_runs_folder_by_default(api, monkeypatch, tmp_path, capsys):
+    _script(api, CLASSIFIED, call_reply("c1", "get_leave_balance", "{}"), text_reply("18.0 left."))
+    monkeypatch.setattr(run_eval, "get_client", lambda api_url: api)
+    monkeypatch.setattr(run_eval, "RUNS_DIR", tmp_path / ".runs")
+
+    exit_code = main(["S001"])
+
+    assert exit_code == 0
+    [run] = (tmp_path / ".runs").glob("*.md")
+    assert re.fullmatch(r"\d{8}T\d{6}Z", run.stem)
+    assert "| S001 Leave balance query | resolve | resolve | yes |" in run.read_text("utf-8")
+    assert f"1 of 1 passed. Tokens 0, EUR 0.0000. Results are in {run}" in capsys.readouterr().out
 
 
 def test_main_returns_one_and_names_the_failed_checks_when_a_scenario_fails(
