@@ -9,11 +9,13 @@ sets `outcome`. The `refuse` node then writes the answer.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 from langchain_core.utils.function_calling import convert_to_openai_function
+from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt import ToolNode
 from openai.types.responses import Response
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -23,11 +25,18 @@ from support_agent.decision_record import DecisionRecord, create_decision_record
 from support_agent.guardrails.verifier import verify_citations
 from support_agent.llm import LLMClient, LLMUnavailableError
 from support_agent.prompts import get_prompt
+from support_agent.redact import redact_secrets
 from support_agent.request_context import get_request_context
 from support_agent.state import AgentState, Family, Language, Risk
 from support_agent.tools import Tool, is_gated_write
+from support_agent.tracing import trace_tool_call
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_LANGUAGE: Language = "en"
+
+# the longest error message kept in the Decision Record
+MAX_ERROR_MESSAGE = 500
 
 REFUSAL_TEXT: dict[Language, str] = {
     "en": (
@@ -37,6 +46,18 @@ REFUSAL_TEXT: dict[Language, str] = {
     "de": (
         "Dabei kann ich nicht helfen. Eine Person aus dem HR- oder IT-Support kann das "
         "übernehmen. Bitte wenden Sie sich direkt an sie."
+    ),
+}
+
+
+FAILURE_TEXT: dict[Language, str] = {
+    "en": (
+        "Something went wrong while I handled your request. HR or IT support can help you. "
+        "Your request id is {request_id}."
+    ),
+    "de": (
+        "Bei der Bearbeitung Ihrer Anfrage ist etwas schiefgelaufen. Der HR- oder IT-Support "
+        "kann Ihnen helfen. Ihre Anfrage-ID lautet {request_id}."
     ),
 }
 
@@ -62,6 +83,63 @@ CLASSIFICATION_FORMAT = {
 def _evidence_since(start: int) -> list[dict[str, Any]]:
     """The evidence items added to the request after the list had `start` items."""
     return list(get_request_context().evidence[start:])
+
+
+def guard_node(
+    name: str, node: Callable[[AgentState], dict[str, Any]]
+) -> Callable[[AgentState], dict[str, Any]]:
+    """Run the node. If an error escapes it, the request ends in escalate instead of failing.
+
+    The node's evidence so far, and a `node_error` item with the error type, the node name
+    and the error message, are added to the state, and `failed_node` is set. The graph then
+    goes to finalize, which saves the Decision Record. The employee gets a short reply with
+    the request id. A proposal that the node made before the error is kept, so it has a
+    Decision Record.
+
+    The message is saved in the Decision Record only, with secrets removed (see redact.py).
+    The log gets the type, the node and the request id, because the message may contain what
+    the employee wrote.
+    """
+
+    def guarded(state: AgentState) -> dict[str, Any]:
+        ctx = get_request_context()
+        start = len(ctx.evidence)
+        try:
+            return node(state)
+        except GraphBubbleUp:
+            raise
+        except Exception as error:
+            logger.error(
+                "node_failed node=%s error_type=%s request_id=%s",
+                name,
+                type(error).__name__,
+                ctx.request_id,
+            )
+            ctx.evidence.append(
+                {
+                    "type": "node_error",
+                    "node": name,
+                    "error_type": type(error).__name__,
+                    "error_message": redact_secrets(str(error))[:MAX_ERROR_MESSAGE],
+                }
+            )
+            evidence = _evidence_since(start)
+            known = state["proposed_action_ids"]
+            proposed = [
+                int(item["ref"].split(":", 1)[1])
+                for item in evidence
+                if item["type"] == "tool_result" and str(item["ref"]).startswith("pending_actions:")
+            ]
+            text = FAILURE_TEXT[state.get("language", DEFAULT_LANGUAGE)]
+            return {
+                "messages": [AIMessage(text.format(request_id=ctx.request_id))],
+                "outcome": "escalate",
+                "failed_node": name,
+                "decision_evidence": evidence,
+                "proposed_action_ids": [i for i in dict.fromkeys(proposed) if i not in known],
+            }
+
+    return guarded
 
 
 def _get_last_user_text(state: AgentState) -> str:
@@ -99,7 +177,11 @@ def classify_node(
             return {"outcome": "escalate", "decision_evidence": _evidence_since(start)}
         except ValidationError as error:
             ctx.evidence.append(
-                {"type": "classification", "status": "invalid", "error": str(error)[:200]}
+                {
+                    "type": "classification",
+                    "status": "invalid",
+                    "error": redact_secrets(str(error))[:200],
+                }
             )
             ctx.evidence.append({"type": "escalation", "reason": "classification_failed"})
             return {"outcome": "escalate", "decision_evidence": _evidence_since(start)}
@@ -257,7 +339,7 @@ def tools_node(tools: Sequence[Tool]) -> Callable[[AgentState], dict[str, Any]]:
     chunk ids of every search to the citation whitelist and the ids of new proposals to
     `proposed_action_ids`, and counts the calls.
     """
-    tool_node = ToolNode(tools)
+    tool_node = ToolNode(tools, wrap_tool_call=trace_tool_call)
     gated_writes = {tool.__name__ for tool in tools if is_gated_write(tool)}
 
     def run_tools(state: AgentState) -> dict[str, Any]:

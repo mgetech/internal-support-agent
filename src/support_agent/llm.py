@@ -30,7 +30,9 @@ from support_agent import audit
 from support_agent.config import get_settings
 from support_agent.costing import PriceTable, call_cost_eur, validate_prices
 from support_agent.prompts import Prompt
+from support_agent.redact import redact_secrets
 from support_agent.request_context import get_request_context
+from support_agent.tracing import Span, start_observation
 
 # same defaults as the OpenAI SDK
 MAX_RETRIES = 2
@@ -104,26 +106,41 @@ class LLMClient:
             call_options = {**options, "reasoning": {"effort": effort}} if effort else options
             for attempt in range(1, tries + 1):
                 started = self._clock()
-                try:
-                    response = self._client.responses.create(
-                        model=current, input=input, **call_options
-                    )
-                    if response.status == "failed":
-                        raise RuntimeError(response.error.message if response.error else "failed")
-                except Exception as exc:
+                error: Exception | None = None
+                response: Response | None = None
+                with start_observation(
+                    prompt.id if prompt else "responses.create",
+                    as_type="generation",
+                    input={"instructions": options.get("instructions"), "input": input},
+                    model=current,
+                    model_parameters={"reasoning_effort": effort} if effort else None,
+                    metadata={**(prompt_tag or {}), "attempt": attempt},
+                ) as generation:
+                    try:
+                        response = self._client.responses.create(
+                            model=current, input=input, **call_options
+                        )
+                        if response.status == "failed":
+                            raise RuntimeError(
+                                response.error.message if response.error else "failed"
+                            )
+                    except Exception as exc:
+                        error = exc
                     latency_ms = round((self._clock() - started) * 1000)
-                    last_error = exc
-                    retryable = is_retryable(exc)
-                    status = "retryable_error" if retryable else "error"
-                    self._record(current, attempt, status, prompt_tag, latency_ms, error=exc)
-                    if retryable and attempt < tries:
-                        # wait 1x, 2x, 4x ... the base delay before the next try
-                        self._sleep(self._retry_delay * 2 ** (attempt - 1))
-                        continue
-                    break
-                latency_ms = round((self._clock() - started) * 1000)
-                self._record(current, attempt, "ok", prompt_tag, latency_ms, response=response)
-                return response
+                    self._update_generation(generation, latency_ms, response, error)
+
+                if error is None:
+                    self._record(current, attempt, "ok", prompt_tag, latency_ms, response=response)
+                    return response
+                last_error = error
+                retryable = is_retryable(error)
+                status = "retryable_error" if retryable else "error"
+                self._record(current, attempt, status, prompt_tag, latency_ms, error=error)
+                if retryable and attempt < tries:
+                    # wait 1x, 2x, 4x ... the base delay before the next try
+                    self._sleep(self._retry_delay * 2 ** (attempt - 1))
+                    continue
+                break
 
             if position + 1 < len(models):
                 self._add_audit_and_evidence(
@@ -134,6 +151,49 @@ class LLMClient:
             {"type": "model_degraded", "outcome": "escalate", "models_tried": models}
         )
         raise LLMUnavailableError(models, last_error)
+
+    def _update_generation(
+        self,
+        generation: Span,
+        latency_ms: int,
+        response: Response | None,
+        error: Exception | None,
+    ) -> None:
+        """Add the result of one try to its trace generation: the token counts and the
+        latency, or the error type. The answer is added only when TRACE_CONTENT is true.
+        """
+        if error is not None or response is None:
+            generation.update(
+                level="ERROR",
+                status_message=type(error).__name__,
+                metadata={"latency_ms": latency_ms},
+            )
+            return
+        usage = response.usage
+        input_tokens = usage.input_tokens if usage else 0
+        output_tokens = usage.output_tokens if usage else 0
+        # No cost is sent. Langfuse works out its own estimate from the model name and the
+        # token counts. The reasoning tokens are already inside the output tokens, so the
+        # total is given and does not add them again.
+        generation.update(
+            usage_details={
+                "input": input_tokens,
+                "output": output_tokens,
+                "output_reasoning_tokens": usage.output_tokens_details.reasoning_tokens
+                if usage
+                else 0,
+                "total": input_tokens + output_tokens,
+            },
+            metadata={"latency_ms": latency_ms},
+            output={
+                "text": response.output_text,
+                "tool_calls": [
+                    {"name": item.name, "arguments": item.arguments}
+                    for item in response.output
+                    if item.type == "function_call"
+                ],
+            },
+        )
 
     def _record(
         self,
@@ -154,7 +214,7 @@ class LLMClient:
             "latency_ms": latency_ms,
         }
         if error is not None:
-            item["error"] = f"{type(error).__name__}: {error}"[:200]
+            item["error"] = redact_secrets(f"{type(error).__name__}: {error}")[:200]
             item["status_code"] = getattr(error, "status_code", None)
         if response is not None:
             usage = response.usage

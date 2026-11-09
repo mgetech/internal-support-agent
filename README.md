@@ -83,6 +83,15 @@ stack, but the automated tests use a scripted one. What exists today:
 - **Model client.** Responses API, retry, fallback model and a cost in euros per call.
 - **Audit log.** Every tool call, proposal, approval, execution, feedback and model call,
   with the request id and the actor.
+- **Tracing.** With Langfuse keys set, each chat request is one trace with a span for every
+  graph node and tool call and a generation for every model call, with tokens, cost and
+  latency. The Decision Record has the trace id. Without keys, tracing is off. A tracing
+  failure never affects a request. Inputs and outputs are in the trace only when
+  `TRACE_CONTENT=true`, which is for synthetic data. Application logs never hold message text or
+  employee ids. Costs in euros are authoritative in the Decision Records. A generation has
+  no cost, only the model name and the token counts, so Langfuse shows its own estimate in
+  dollars. To
+  make that estimate match, define the Azure deployments as custom models in Langfuse.
 - **Versioned prompts.** A prompt change without a version bump fails a test.
 - **Docker Compose.** One command starts the database, the API and the UI. The seed data
   is loaded once, on the first start.
@@ -102,6 +111,7 @@ the behavior and its test exist.
 | Failure | What the system does | Proven by |
 |---|---|---|
 | Model API error | The client retries the same model up to two more times. If that fails, it tries the fallback model, when one is set. If every model fails, the request ends in `escalate`. The tries are listed in the Decision Record. | `src/support_agent/llm.py`, `tests/test_llm_fallback.py`, `tests/test_agent_node.py` |
+| An error escapes a graph node | The request ends in `escalate`. The Decision Record has the error and the node, and the employee gets a short reply with the request id. A proposal made before the error keeps its record. If saving the record fails too, the answer is a plain 500. | `src/support_agent/nodes.py`, `tests/test_node_failure.py` |
 | The agent reaches the tool limit | The calls that would go over the limit (8 by default) are not run. The request ends in `escalate`. | `tests/test_tools_node.py`, `tests/test_decision_record.py` |
 | An answer cites a section the search did not return, or a refusal has no citation | The agent runs once more and sees the objection. If it fails again, the request ends in `escalate`. | `src/support_agent/guardrails/verifier.py`, `tests/test_verifier.py`, `tests/test_decline_request.py` |
 | The same write is requested twice | The action that is still waiting is returned. No second action is added. | `tests/test_tools_db.py` |
@@ -133,6 +143,11 @@ Rough build order:
 - **Observability and feedback** — per-node traces with cost and latency budgets, a
   usage dashboard, and a path that turns a thumbs-down into a new eval scenario.
 
+Future work:
+
+- **Azure deployment of the full stack** — app, database and a self-hosted Langfuse in one
+  EU subscription — for teams that want full trace content with real employee data.
+
 ## Stack
 
 | Layer | Choice | Status |
@@ -149,7 +164,7 @@ Rough build order:
 | Chunking | Pluggable `Chunker` interface; structural (heading-aware) default, chosen by ablation against fixed-size, recursive and semantic | Partial — structural chunker only |
 | MCP | Official Python MCP SDK (FastMCP) exposing the tool belt; stdio + streamable HTTP | Planned |
 | Eval tooling | Own deterministic harness (gates, trajectory, retrieval) + **RAGAS** for answer quality | Partial — six scenarios and a deterministic runner (`make eval`, one run each); gate, n=3 and RAGAS planned. See [docs/evaluation.md](docs/evaluation.md) |
-| Observability | **Langfuse** (cloud keys via `.env`; self-hostable for residency) | Planned |
+| Observability | **Langfuse** (cloud keys via `.env`; self-hostable for residency) | Partial — a trace for each chat request, with a span for every graph node and tool call and a generation for every model call; off without keys. Prompt tags and scores are planned |
 | UI | Streamlit — chat, approval queue, decision records, cost | Partial — chat, my requests, approval queue and decision records tabs (`make ui`); the cost tab is planned |
 
 ## REST API
@@ -196,7 +211,10 @@ data. If a port is already in use, set `DB_PORT`, `API_PORT` or `UI_PORT` in `.e
 `make setup` once before it.
 
 To work on the code, run `make setup`, `make db-up` and `make seed`. Then `make test` and
-`make lint` work. The tests need no model keys.
+`make lint` work. The tests need no model keys. They drop and rebuild the schema of their
+database, so `make test` runs them on a separate database, `support_agent_test`, which it
+creates on the same server. The suite refuses to run on any database whose name does not
+end with `_test` or `_scratch`.
 
 
 ## License

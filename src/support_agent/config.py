@@ -37,9 +37,21 @@ class Settings(BaseSettings):
 
     max_tool_calls_per_request: int = DEFAULT_MAX_TOOL_CALLS_PER_REQUEST
 
+    # the level of the app's own loggers. Every other logger stays at WARNING.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+
     # a pending action without a Decision Record is flagged only after this long, so a
     # request that is still running is never flagged. Read by reconciliation.py.
     orphan_grace_minutes: int = 10
+
+    # Langfuse tracing is off unless both keys are set. Read by tracing.py.
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_base_url: str = "https://cloud.langfuse.com"
+    # when true, spans and model calls carry their inputs and outputs: the employee's
+    # message, the tool arguments and results, the prompts and the answers. When false,
+    # they carry names, times, token counts and statuses only.
+    trace_content: bool = False
 
     # {"<deployment>": {"input_per_1k": eur, "output_per_1k": eur}} — embedding
     # deployments carry input_per_1k only. Read by costing.py.

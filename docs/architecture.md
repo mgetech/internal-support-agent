@@ -49,8 +49,10 @@ A request ends in `escalate` at these points:
 | agent | no model answered, or the model sent tool arguments that were not valid JSON |
 | agent | the next tool calls would go over the tool limit |
 | verify | the answer cited a chunk this request did not retrieve, or a refusal had no citation, a second time |
+| any node | an error escaped the node |
 
-The `refuse` node then writes the answer in the language of the request.
+The `refuse` node then writes the answer in the language of the request. An error that
+escapes a node is handled differently: see "An error in a node" below.
 
 Every request ends in exactly one outcome:
 
@@ -308,6 +310,24 @@ calls run, and the request escalates. The calls of one reply are never cut to fi
 each tool result, each model call and fallback, each check result, each retry and each
 escalation with its reason. The list is the source for the Decision Record.
 
+**An error in a node.** Every node except `finalize` runs inside `guard_node`. If an error
+escapes the node, the request does not fail. The node's evidence so far and a `node_error`
+item are added to the state: the error type, the node name and the error message. The state
+gets `failed_node`, and the outcome is `escalate`. Every route after that goes straight to
+`finalize`, which saves the Decision Record with the summary "Request failed at <node>;
+handed to a human." The employee gets a short reply that says something went wrong, that
+HR or IT support can help, and the request id. A proposal that was made before the error
+stays in the queue, and it has the record of its request. So the orphan check does not flag
+it. The error message is saved in the Decision Record only, with secrets removed first
+(`redact.py`): the credentials in a connection string, the value after `password`, `key`,
+`token` or `secret`, bearer tokens, and anything shaped like an API key. The message is cut
+at 500 characters. The log has the error type, the node name and the request id, and the
+trace span has the error type. The "Why this answer?" view shows "Request failed at <node>
+(<ErrorType>)" and not the message. The message stays in the saved record for engineers.
+The redaction cuts too much rather than too little, so a long mix of letters and digits is
+removed even when it was an id. If `finalize` fails too, for example because the database is down, the
+request ends in the generic 500 from the API.
+
 **Design choices**
 - A node returns only the fields it changes. Lists such as the evidence and the chunk ids
   add up across nodes. Values such as the outcome and the tool counter are replaced.
@@ -345,7 +365,7 @@ Every request that reaches the end of the graph saves one row in `decision_recor
 - the policy version, the prompt versions and every check result
 - each model call with tokens, cost in euros and time taken, the totals, and the time the
   whole request took
-- the trace id, which is empty because tracing is not built yet
+- the trace id, when tracing is on. It is empty when no Langfuse keys are set
 
 The record and the final `decision_recorded` audit event are saved in one transaction.
 The request id is unique, so a request can have only one record.
@@ -374,6 +394,51 @@ every policy with its version, sorted by policy name, for example
 `expense-policy@2026-09.1; it-access-policy@2026-11.1; ...`. It names the versions that
 the database holds, not the versions of the files on disk. If one policy has sections of
 several versions, it is listed once for each.
+
+## Tracing
+
+With Langfuse keys in `.env`, every request is one trace. `POST /chat` opens a `request`
+span, and each graph node and each tool call is a span inside it. Each model call is a
+generation inside the node that made it, one for every try. A generation has the model, the
+input, output and reasoning token counts, the time taken, and the prompt id and version.
+It has no cost. Langfuse works out its own estimate from the model name and the token
+counts, and shows it in dollars. The cost in euros is in the Decision Record, and that
+number is the one to trust. The `request` span has the request id and the outcome. The
+trace id is saved in the Decision Record.
+
+Tracing is off unless both `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set. Then no
+span is made and nothing is sent, so the tests and CI run without keys.
+
+**What a span carries.** With `TRACE_CONTENT=false`, the default, a span has names, times,
+token counts and statuses. With `TRACE_CONTENT=true`, it also has inputs and outputs:
+the employee's message and the answer on the `request` span, the arguments and the result
+on a tool span, and the prompt and the reply on a generation. Spans never have an employee
+id, a Langfuse user id or a session.
+
+**A trace never changes a request.** Every call to Langfuse is guarded. If the client
+raises or times out, a warning is logged and the request goes on. The record is saved
+without a trace id. Langfuse sends the spans from a background thread, so a slow Langfuse
+does not slow a request.
+
+**Logs.** A log line has the request id, the trace id, the name of an event, a time or the
+type of an error. It never has message text, tool arguments or results, an answer or an
+employee id. An error that no route handled is logged by its type and the request id, with
+no message and no stack trace, because the message may contain what the employee wrote.
+The API answers 500 with a fixed text and the request id, so a report from a user can be
+found in the log. A handler registered for `Exception` is not enough for this: Starlette
+raises the error again after it, and Uvicorn then logs the message and the stack trace. So
+the catch-all is in the middleware that also writes the access line.
+
+Uvicorn's access log is turned off, because it has the client address and the query string,
+and a query can have an employee id. The API writes its own access line instead: method,
+path without the query, status and time.
+
+Logging is an allowlist. Only the loggers under `support_agent` follow the level of the
+app (`LOG_LEVEL`, INFO by default). The root logger and every other logger, such as
+`httpx`, `httpcore`, `urllib3` and `langfuse`, stay at WARNING, whatever level the app
+uses. A library that is added later is quiet from the start. The one exception is
+`uvicorn.error`, which stays at INFO so the start and stop lines of the server are shown.
+`logs.py` sets all this when the app starts.
 
 ## Orphan check
 
@@ -488,7 +553,10 @@ The agent is not told today's date, so a date without a year can make it ask for
 
 ## Tests
 
-`make test` needs no model keys.
+`make test` needs no model keys. The database tests drop and rebuild the schema of the
+database they connect to. So `make test` creates `support_agent_test` on the same server
+and runs the suite there, and the suite stops before any test if the database name does not
+end with `_test` or `_scratch` (`tests/database_guard.py`).
 
 - **Unit tests** need no database. The model client, the cost, the verifier, the nodes and
   the state are tested with stand-ins.
@@ -546,13 +614,22 @@ far larger than this one.
 **Our own Decision Records, not the trace.** A Decision Record is a row in Postgres. It
 has what an HR partner needs to see why the agent did what it did, and the API controls who
 can read it. A trace is good for debugging, but it can be sampled or removed, and it is
-outside our access rules. Tracing is planned, and the record has a field for
-the trace id, which is empty until then.
+outside our access rules. The record has the id of the trace, so you can go from one to
+the other, but the record does not depend on the trace.
+
+**Where personal data lives.** Decision Records and the audit log hold it. The API shows a
+record to an HR partner only. A retention purge and a data export for each employee are
+planned. Application logs never hold it. Traces hold it only when `TRACE_CONTENT` is on.
+Langfuse Cloud EU stores its data in the EU, but a third party runs it. So trace content
+with real employee data needs a Langfuse that we host ourselves in our own EU
+infrastructure. With real data and Langfuse Cloud, keep `TRACE_CONTENT=false`.
 
 ## Known limits
 
 - A policy claim that has no citation at all passes the check. Claim extraction is planned.
-- The trace id is always empty until tracing is built.
+- The prompt tags and the scenario ids are not on the traces yet.
+- With `TRACE_CONTENT=true`, trace content leaves the database. Use it with synthetic data
+  only, or with a Langfuse that we host.
 - A refusal that fails the check can be followed by a plain answer on the retry. Then the
   request ends in `resolve`, not in `refuse_with_citation`, because only a call of
   `decline_request` sets that outcome.

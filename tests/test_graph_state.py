@@ -49,6 +49,7 @@ def test_state_has_the_fields_the_graph_needs():
         "tool_calls_used",
         "outcome",
         "verifier_objection",
+        "failed_node",
         "decision_evidence",
     }
 

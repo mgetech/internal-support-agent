@@ -4,12 +4,17 @@ names the employee, and the request is bound to that employee before the graph r
 
 from __future__ import annotations
 
+import logging
+import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import date, datetime
 from functools import lru_cache
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,11 +36,55 @@ from support_agent.guardrails.approval import (
     get_pending_actions,
 )
 from support_agent.llm import get_llm_client
+from support_agent.logs import access_logger, configure_logging
 from support_agent.request_context import bind_request_context
 from support_agent.state import Outcome, new_state
 from support_agent.tools.policy_search import get_policy_chunk
+from support_agent.tracing import start_observation
 
-app = FastAPI(title="Internal support agent")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    configure_logging(get_settings().log_level)
+    yield
+
+
+app = FastAPI(title="Internal support agent", lifespan=lifespan)
+logger = logging.getLogger(__name__)
+
+
+@app.middleware("http")
+async def log_request(request: Request, call_next: Any) -> Any:
+    """Give the request its id, then write the access line: method, path without the query,
+    status and time.
+
+    This is also the catch-all for errors. An error that no route handled is logged by its
+    type and the request id, and the answer is a 500 with a fixed text and the request id.
+    The error message and the stack trace are not logged, because they may contain what the
+    employee wrote. A handler registered for `Exception` would not do: Starlette raises the
+    error again after it, and Uvicorn then logs the message and the stack trace.
+    """
+    request_id = uuid.uuid4().hex
+    request.state.request_id = request_id
+    started = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    except Exception as error:
+        logger.error("request_failed error_type=%s request_id=%s", type(error).__name__, request_id)
+        return JSONResponse(
+            {"detail": "the request failed", "request_id": request_id}, status_code=500
+        )
+    finally:
+        access_logger.info(
+            "%s %s %d %dms",
+            request.method,
+            request.url.path,
+            status,
+            round((time.perf_counter() - started) * 1000),
+        )
 
 
 class ChatRequest(BaseModel):
@@ -137,14 +186,24 @@ def get_graph() -> CompiledStateGraph:
 
 @app.post("/chat")
 def create_chat(
+    request: Request,
     body: ChatRequest,
     employee_id: Annotated[str, Depends(get_current_employee_id)],
     graph: Annotated[CompiledStateGraph, Depends(get_graph)],
 ) -> ChatResponse:
     """Run the agent for one message from the employee named in the header."""
-    request_id = uuid.uuid4().hex
-    with bind_request_context(employee_id, request_id, "rest"):
+    request_id = request.state.request_id
+    with (
+        bind_request_context(employee_id, request_id, "rest"),
+        start_observation(
+            "request", metadata={"request_id": request_id}, input=body.message
+        ) as span,
+    ):
         result = graph.invoke(new_state(body.message))
+        span.update(
+            metadata={"request_id": request_id, "outcome": result["outcome"]},
+            output=result["messages"][-1].text,
+        )
     return ChatResponse(
         answer=result["messages"][-1].text, outcome=result["outcome"], request_id=request_id
     )

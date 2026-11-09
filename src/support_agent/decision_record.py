@@ -17,6 +17,7 @@ from support_agent import audit, db
 from support_agent.costing import model_calls, request_total_cost
 from support_agent.request_context import Channel, bind_request_context, get_request_context
 from support_agent.state import AgentState, Outcome
+from support_agent.tracing import get_trace_id
 
 # The only role that may read Decision Records. A record holds the questions an employee
 # asked, which can be about health, and the technical detail of the model calls. An
@@ -81,6 +82,9 @@ def summarize(
     evidence with fixed wording; no model writes it.
     """
     if outcome == "escalate":
+        failures = [item["node"] for item in evidence if item["type"] == "node_error"]
+        if failures:
+            return f"Request failed at {failures[-1]}; handed to a human."
         reasons = [item["reason"] for item in evidence if item["type"] == "escalation"]
         why = ESCALATION_REASONS.get(reasons[-1] if reasons else "", "a person needs to decide")
         return f"Escalated to a person: {why}."
@@ -141,8 +145,8 @@ def create_decision_record(state: AgentState, policy_version: str | None = None)
         total_tokens=totals.tokens,
         total_cost_eur=totals.cost_eur,
         latency_ms=round((time.perf_counter() - ctx.started_at) * 1000),
-        # there is no tracing yet
-        trace_id=None,
+        # None when tracing is off
+        trace_id=get_trace_id(),
     )
 
 

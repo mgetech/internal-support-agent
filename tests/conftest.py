@@ -5,6 +5,7 @@ cleanly when no database is reachable, so `make test` stays green without
 
 from __future__ import annotations
 
+import uuid
 from datetime import date
 from pathlib import Path
 
@@ -17,9 +18,11 @@ from data.generate import (
     generate_leave_balances,
     generate_policy_chunks,
 )
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from tests.database_guard import DatabaseSettings, check_test_database
 
-from support_agent import util
+from support_agent import tracing, util
+from support_agent.config import Settings
 from support_agent.tools import policy_search
 
 # the date every test runs on, a Tuesday. The seed is generated as of this date too.
@@ -36,15 +39,13 @@ def _statements(sql: str) -> list[str]:
     return [s.strip() for s in without_comments.split(";") if s.strip()]
 
 
-class _DatabaseSettings(BaseSettings):
-    """Reads only DATABASE_URL, from the same .env file as the real Settings.
-    DB tests need nothing else, and must not fail just because unrelated
-    settings (Azure OpenAI keys, absent in CI) aren't configured.
+def pytest_configure(config):
+    """Stop before any test runs if the database is not a test database. The database tests
+    drop and rebuild the schema of the database they connect to. See database_guard.py.
     """
-
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
-
-    database_url: str | None = None
+    problem = check_test_database(DatabaseSettings().database_url)
+    if problem:
+        pytest.exit(problem, returncode=3)
 
 
 @pytest.fixture(autouse=True)
@@ -55,12 +56,56 @@ def fixed_today(monkeypatch):
     monkeypatch.setattr(util, "get_today", lambda: TEST_TODAY)
 
 
+@pytest.fixture(autouse=True)
+def tracing_off(monkeypatch):
+    """Tracing is off in every test, even when .env has Langfuse keys, so no test sends a
+    trace. Inputs and outputs are off too. A test turns tracing on with the `spans` fixture,
+    and the content on with `monkeypatch.setattr(tracing, "is_content_traced", lambda: True)`.
+    """
+    monkeypatch.setattr(tracing, "get_langfuse", lambda: None)
+    monkeypatch.setattr(tracing, "is_content_traced", lambda: False)
+
+
+@pytest.fixture
+def spans(monkeypatch):
+    """Turns tracing on, with a client that keeps the spans in memory. Returns a function
+    that gives the spans finished so far.
+    """
+    exporter = InMemorySpanExporter()
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql://user:pass@localhost:5432/support_agent",
+        azure_openai_endpoint="https://example.invalid/openai/v1",
+        azure_openai_api_key="test-key",
+        azure_openai_deployment_agent="main",
+        azure_openai_deployment_classifier="small",
+        azure_openai_deployment_embedding="embedding",
+        # each client needs its own public key, because Langfuse keeps one per key
+        langfuse_public_key=f"pk-lf-{uuid.uuid4().hex}",
+        langfuse_secret_key="sk-lf-test",
+        langfuse_base_url="https://langfuse.invalid",
+    )
+    client = tracing.create_langfuse(settings, span_exporter=exporter)
+    monkeypatch.setattr(tracing, "get_langfuse", lambda: client)
+
+    def finished():
+        client.flush()
+        return exporter.get_finished_spans()
+
+    yield finished
+    client.shutdown()
+
+
 @pytest.fixture(scope="session")
 def db_conn():
     """A connection to a database freshly (re)built from db/init.sql."""
-    database_url = _DatabaseSettings().database_url
+    database_url = DatabaseSettings().database_url
     if not database_url:
         pytest.skip("DATABASE_URL not set; run `make db-up` first")
+    # the same check as at the start, right before the schema is dropped
+    problem = check_test_database(database_url)
+    if problem:
+        pytest.exit(problem, returncode=3)
     try:
         conn = psycopg.connect(database_url, autocommit=True, connect_timeout=2)
     except psycopg.OperationalError:

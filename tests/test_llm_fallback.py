@@ -431,3 +431,17 @@ def test_get_llm_client_takes_the_fallback_effort_from_the_settings(monkeypatch)
     monkeypatch.setattr(llm, "get_settings", lambda: settings)
 
     assert llm.get_llm_client()._fallback_effort == "medium"
+
+
+def test_a_secret_in_a_model_error_is_removed_from_the_evidence(audit_events):
+    leaked = RuntimeError("bad request for key sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")
+    client = LLMClient(FakeOpenAI([leaked]), PRICES, max_retries=0)
+
+    with (
+        bind_request_context("emp_001", "req-1", "rest") as ctx,
+        pytest.raises(LLMUnavailableError),
+    ):
+        client.create("main", [{"role": "user", "content": "hi"}])
+
+    (failed,) = [item for item in ctx.evidence if item["type"] == "model_call"]
+    assert failed["error"] == "RuntimeError: bad request for key [redacted]"

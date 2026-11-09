@@ -251,12 +251,30 @@ def show_feedback(employee_id: str, item: dict[str, Any]) -> None:
     st.rerun()
 
 
+def format_failure(item: dict[str, Any]) -> str:
+    """The line for a `node_error` evidence item: the node and the type of the error."""
+    return f"Request failed at {item['node']} ({item['error_type']})"
+
+
+def without_error_messages(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The evidence without the `error_message` of a failure. The message stays in the
+    saved record for engineers. It can have text that the employee wrote.
+    """
+    return [
+        {key: value for key, value in item.items() if key != "error_message"} for item in evidence
+    ]
+
+
 def show_decision_record(record: dict[str, Any]) -> None:
     """Why the agent did what it did: the summary, the cost, the citations, the versions
-    and the evidence, all from the saved record.
+    and the evidence, all from the saved record. A failed request shows the node and the
+    type of the error, never the error message.
     """
     show_outcome_badge(record["outcome"])
     st.write(record["summary"])
+    for item in record["evidence"]:
+        if item.get("type") == "node_error":
+            st.error(format_failure(item))
 
     with st.container(horizontal=True):
         st.metric("Tokens", record["total_tokens"], border=True)
@@ -279,7 +297,7 @@ def show_decision_record(record: dict[str, Any]) -> None:
         st.dataframe(record["model_calls"], hide_index=True)
 
     st.markdown("**Evidence**")
-    st.json(record["evidence"], expanded=False)
+    st.json(without_error_messages(record["evidence"]), expanded=False)
     st.caption(f"Request {record['request_id']} · trace {record['trace_id'] or 'none'}")
 
 

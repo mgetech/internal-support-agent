@@ -256,7 +256,7 @@ def test_the_policy_version_is_recorded_when_given():
     assert build_record(final_state()).policy_version is None
 
 
-def test_the_record_has_a_latency_and_no_trace_id_yet():
+def test_the_record_has_a_latency_and_no_trace_id_when_tracing_is_off():
     record = build_record(final_state())
 
     assert record.latency_ms >= 0

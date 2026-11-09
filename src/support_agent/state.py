@@ -30,6 +30,9 @@ class AgentState(TypedDict):
     # set when the first draft fails the verifier. The agent node adds it to every model
     # call after that, as a system message. A failure while it is set escalates.
     verifier_objection: str | None
+    # the name of the node that raised an error. Set by guard_node; the graph then goes
+    # straight to finalize and the request ends in escalate.
+    failed_node: str | None
     # ordered evidence items for the Decision Record
     decision_evidence: Annotated[list[dict[str, Any]], operator.add]
 
@@ -43,5 +46,6 @@ def new_state(text: str) -> AgentState:
         "tool_calls_used": 0,
         "outcome": None,
         "verifier_objection": None,
+        "failed_node": None,
         "decision_evidence": [],
     }

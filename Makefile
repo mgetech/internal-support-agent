@@ -22,8 +22,11 @@ lint:
 format:
 	$(PYTHON) -m ruff format .
 
+# The database tests drop and rebuild the schema of their database, so they run against
+# a test database. tests/database_guard.py makes support_agent_test on the same server
+# if it is missing and prints its URL. The suite refuses to run on any other database.
 test:
-	$(PYTHON) -m pytest
+	DATABASE_URL="$$($(PYTHON) -m tests.database_guard)" $(PYTHON) -m pytest
 
 # delete the database volume, start a new database and seed it. Use it after a schema change,
 # because db/init.sql only runs on a new volume
